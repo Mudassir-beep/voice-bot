@@ -15,12 +15,14 @@ RUN pip install --no-cache-dir -r requirements.txt
 # Copy application
 COPY . .
 
+# Create data directory for volume
+RUN mkdir -p /app/data
+
 # Create a non-root user
 RUN useradd -m -u 1000 reem && chown -R reem:reem /app
 USER reem
 
-EXPOSE 10000
-EXPOSE 8765
+EXPOSE 7860
 
-# Use run.py to start both servers
-CMD ["python", "run.py"]
+# Railway uses PORT env var
+CMD ["sh", "-c", "streamlit run app.py --server.port=$PORT --server.address=0.0.0.0 --server.headless=true"]
