@@ -443,21 +443,20 @@ for msg in st.session_state.messages:
         st.write(msg["content"])
 
 # ── Continuous Streaming Component ────────────────────────────────────────
-# Get Render URL for WebSocket
-render_url = os.environ.get("RENDER_EXTERNAL_URL", "localhost:10000")
-# Remove protocol for WebSocket
-if render_url.startswith("https://"):
-    ws_host = render_url.replace("https://", "")
-elif render_url.startswith("http://"):
-    ws_host = render_url.replace("http://", "")
-else:
-    ws_host = render_url
+railway_domain = os.environ.get("RAILWAY_PUBLIC_DOMAIN", "")
+render_domain = os.environ.get("RENDER_EXTERNAL_URL", "")
 
-ws_url = f"wss://{ws_host}" if render_url.startswith("https") else f"ws://{ws_host}"
+if railway_domain:
+    ws_url = f"wss://{railway_domain}/ws"
+elif render_domain:
+    ws_url = render_domain.replace("https://", "wss://").replace("http://", "ws://") + "/ws"
+else:
+    ws_url = "ws://localhost:8080/ws"
 
 audio_html = f"""
 <script>
-const WS_URL = '{ws_url}/ws';
+const WS_URL = '{ws_url}';
+# ... rest of your existing audio_html unchanged
 let ws = null;
 let isListening = false;
 let audioContext = null;
