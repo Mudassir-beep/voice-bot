@@ -12,7 +12,7 @@ import httpx
 import uvicorn
 import websockets as ws_lib
 from fastapi import FastAPI, Request, Response, WebSocket, WebSocketDisconnect
-from fastapi.responses import Response
+
 
 log = logging.getLogger("server")
 logging.basicConfig(level=logging.INFO)
