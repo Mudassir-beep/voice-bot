@@ -5,6 +5,5 @@ faiss-cpu>=1.7.4
 numpy>=1.24.0
 requests>=2.31.0
 websockets>=12.0
-torch==2.0.1+cpu
-torchvision==0.15.2+cpu
--f https://download.pytorch.org/whl/cpu/torch_stable.html
+torch>=2.0.0
+torchvision>=0.15.0
