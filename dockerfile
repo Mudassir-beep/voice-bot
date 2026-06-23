@@ -17,7 +17,7 @@ COPY . .
 # Create data directory for volume
 RUN mkdir -p /app/data
 
-EXPOSE 7860
+EXPOSE 8080
 
-# Run Streamlit
-CMD ["streamlit", "run", "app.py", "--server.port=7860", "--server.address=0.0.0.0", "--server.headless=true"]
+# Use Railway's PORT environment variable
+CMD ["sh", "-c", "streamlit run app.py --server.port=$PORT --server.address=0.0.0.0 --server.headless=true"]
