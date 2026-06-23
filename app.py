@@ -26,7 +26,7 @@ log = logging.getLogger("reem")
 # ── Config ───────────────────────────────────────────────────────────────────
 GROQ_API_KEY = os.environ.get("GROQ_API_KEY", "")
 DEEPGRAM_API_KEY = os.environ.get("DEEPGRAM_API_KEY", "")
-PORT = int(os.environ.get("PORT", 10000))
+PORT = int(os.environ.get("PORT", 8080))
 WS_PORT = int(os.environ.get("WS_PORT", 8765))
 
 EMBED_MODEL = "all-MiniLM-L6-v2"
