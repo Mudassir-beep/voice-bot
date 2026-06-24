@@ -332,7 +332,21 @@ function connectWebSocket() {{
                 document.getElementById('status').textContent = '✅ ' + data.text;
                 document.getElementById('status').style.color = '#4caf50';
                 
-                // Set the pending query in session state via the chat input
+                // Update latest_transcript in session state via hidden input
+                const hiddenInputs = document.querySelectorAll('input[type="text"]');
+                for (let input of hiddenInputs) {{
+                    if (input.closest('[data-testid="stTextInput"]') || 
+                        input.placeholder === '' || 
+                        input.getAttribute('key') === 'latest_transcript') {{
+                        input.value = data.text;
+                        input.dispatchEvent(new Event('input', {{ bubbles: true }}));
+                        input.dispatchEvent(new Event('change', {{ bubbles: true }}));
+                        console.log('✅ Sent transcript to hidden input');
+                        break;
+                    }}
+                }}
+                
+                // Also try the chat input
                 const input = document.querySelector('[data-testid="stChatInput"] textarea');
                 if (input) {{
                     input.value = data.text;
@@ -343,23 +357,13 @@ function connectWebSocket() {{
                             button.click();
                             console.log('✅ Auto-submitted to chat');
                         }} else {{
-                            console.log('⚠️ No send button found, trying Enter key');
-                            input.dispatchEvent(new KeyboardEvent('keydown', {{
-                                key: 'Enter',
-                                code: 'Enter',
-                                keyCode: 13,
-                                which: 13,
-                                bubbles: true
-                            }}));
+                            console.log('⚠️ No send button found');
                         }}
                     }}, 300);
                 }} else {{
                     console.log('⚠️ Chat input not found');
-                    // Show in status so user can copy-paste
-                    document.getElementById('status').textContent = '📝 Copy this: ' + data.text;
                 }}
             }} else if (data.type === 'transcript' && !data.is_final && data.text) {{
-                // Show interim results
                 document.getElementById('status').textContent = '💭 ' + data.text;
                 document.getElementById('status').style.color = '#ff9800';
             }}
