@@ -12,6 +12,7 @@ import httpx
 import uvicorn
 import websockets as ws_lib
 from fastapi import FastAPI, Request, Response, WebSocket, WebSocketDisconnect
+from fastapi.middleware.cors import CORSMiddleware
 
 log = logging.getLogger("server")
 logging.basicConfig(level=logging.INFO)
@@ -40,18 +41,27 @@ with _streamlit_lock:
     if not _streamlit_started:
         _streamlit_started = True
         threading.Thread(target=run_streamlit, daemon=True).start()
-        log.info("Waiting for Streamlit to start...")
+        log.info("⏳ Waiting for Streamlit to start...")
         for i in range(30):
             try:
                 r = httpx.get(f"http://localhost:{STREAMLIT_PORT}/_stcore/health", timeout=2)
                 if r.status_code == 200:
-                    log.info("Streamlit is ready!")
+                    log.info("✅ Streamlit is ready!")
                     break
             except Exception:
                 pass
             time.sleep(1)
 
 app = FastAPI()
+
+# ── CORS Middleware ──────────────────────────────────────────────────────────
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 # ── Deepgram streaming ───────────────────────────────────────────────────────
 async def deepgram_stream(session_id: str, client_ws: WebSocket, audio_q: asyncio.Queue):
@@ -103,21 +113,34 @@ async def deepgram_stream(session_id: str, client_ws: WebSocket, audio_q: asynci
                         msg = await asyncio.wait_for(dg_ws.recv(), timeout=30)
                         data = json.loads(msg)
                         
+                        # Log all Deepgram responses for debugging
+                        log.info(f"[{session_id}] 📩 DG response type: {data.get('type', 'unknown')}")
+                        
                         if data.get("type") == "Results":
                             alts = data.get("channel", {}).get("alternatives", [{}])
                             text = alts[0].get("transcript", "").strip() if alts else ""
                             is_final = data.get("is_final", False)
                             
+                            # Log even interim results
                             if text:
                                 log.info(f"[{session_id}] 🎤 Transcript: '{text}' (final={is_final})")
+                                
+                                # Send BOTH interim and final results to client
+                                await client_ws.send_json({
+                                    "type": "transcript",
+                                    "text": text,
+                                    "is_final": is_final
+                                })
+                                
+                                # If final, also send a special notification
                                 if is_final:
+                                    log.info(f"[{session_id}] ✅ FINAL TRANSCRIPT: {text}")
                                     await client_ws.send_json({
-                                        "type": "transcript",
-                                        "text": text,
-                                        "is_final": True
+                                        "type": "final_transcript",
+                                        "text": text
                                     })
                     except asyncio.TimeoutError:
-                        # Keep connection alive with ping
+                        # Keep connection alive
                         continue
                     except Exception as e:
                         log.error(f"[{session_id}] ❌ Receive error: {e}")
@@ -238,9 +261,25 @@ async def proxy_websocket(websocket: WebSocket, path: str):
     except Exception as e:
         log.error(f"WS proxy error /{path}: {e}")
 
+# ── HTTP endpoint ────────────────────────────────────────────────────────────
+@app.get("/")
+@app.get("/health")
+async def health():
+    return {
+        "status": "ok",
+        "service": "Reem Voice Agent",
+        "streamlit": "running",
+        "groq": "✅" if os.environ.get("GROQ_API_KEY") else "❌",
+        "deepgram": "✅" if DEEPGRAM_API_KEY else "❌"
+    }
+
 # ── HTTP proxy to Streamlit ──────────────────────────────────────────────────
 @app.api_route("/{path:path}", methods=["GET", "POST", "PUT", "DELETE", "OPTIONS", "HEAD", "PATCH"])
 async def proxy_http(request: Request, path: str):
+    # Skip WebSocket paths
+    if path.startswith("ws"):
+        return Response(content="WebSocket handled separately", status_code=404)
+    
     url = f"{STREAMLIT_URL}/{path}"
     if request.url.query:
         url += f"?{request.url.query}"
