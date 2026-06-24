@@ -152,10 +152,7 @@ async def proxy_websocket(websocket: WebSocket, path: str):
         url += f"?{query}"
 
     try:
-        async with ws_lib.connect(
-            url,
-            subprotocols=websocket.headers.get("sec-websocket-protocol", "").split(",") or None
-        ) as upstream:
+        async with ws_lib.connect(url) as upstream:
             async def to_upstream():
                 try:
                     while True:
@@ -211,4 +208,5 @@ async def proxy_http(request: Request, path: str):
 
 
 if __name__ == "__main__":
+    uvicorn.run("server:app", host="0.0.0.0", port=PORT)
     uvicorn.run("server:app", host="0.0.0.0", port=PORT)
