@@ -37,7 +37,6 @@ def run_streamlit():
     ])
 
 with _streamlit_lock:
-    global _streamlit_started
     if not _streamlit_started:
         _streamlit_started = True
         threading.Thread(target=run_streamlit, daemon=True).start()
@@ -201,7 +200,6 @@ async def proxy_http(request: Request, path: str):
     if request.url.query:
         url += f"?{request.url.query}"
 
-    # Strip compression headers so we get raw uncompressed response
     headers = {
         k: v for k, v in request.headers.items()
         if k.lower() not in ("host", "accept-encoding")
@@ -215,7 +213,6 @@ async def proxy_http(request: Request, path: str):
                 headers=headers,
                 content=await request.body(),
             )
-            # Strip content-encoding and content-length to avoid mismatch
             resp_headers = {
                 k: v for k, v in resp.headers.items()
                 if k.lower() not in ("content-encoding", "content-length", "transfer-encoding")
