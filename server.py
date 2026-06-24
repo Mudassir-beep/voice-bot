@@ -73,16 +73,21 @@ async def deepgram_stream(session_id: str, client_ws: WebSocket, audio_q: asynci
         async with ws_lib.connect(uri, additional_headers=headers) as dg_ws:
             log.info(f"[{session_id}] Deepgram connected")
 
-            async def sender():
-                while True:
-                    chunk = await audio_q.get()
-                    if chunk is None:
-                        break
-                    try:
-                        await dg_ws.send(chunk)
-                    except Exception as e:
-                        log.error(f"[{session_id}] DG send error: {e}")
-                        break
+        async def sender():
+    while True:
+        try:
+            chunk = await asyncio.wait_for(audio_q.get(), timeout=5.0)
+            if chunk is None:
+                break
+            await dg_ws.send(chunk)
+        except asyncio.TimeoutError:
+            try:
+                await dg_ws.send(json.dumps({"type": "KeepAlive"}))
+            except Exception:
+                break
+        except Exception as e:
+            log.error(f"[{session_id}] DG send error: {e}")
+            break
 
             async def receiver():
                 async for msg in dg_ws:
