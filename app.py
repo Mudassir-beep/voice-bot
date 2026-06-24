@@ -543,6 +543,25 @@ connectWebSocket();
 
 st.components.v1.html(audio_html, height=200)
 
+# ── Voice Transcript Display & Send ──────────────────────────────────────────
+if "latest_transcript" not in st.session_state:
+    st.session_state.latest_transcript = ""
+
+# Show the latest transcript with a send button
+if st.session_state.latest_transcript:
+    st.divider()
+    col1, col2, col3 = st.columns([1, 3, 1])
+    with col2:
+        st.info(f"🎤 You said: **{st.session_state.latest_transcript}**")
+        if st.button("📤 Send to Bot", use_container_width=True, type="primary"):
+            query = st.session_state.latest_transcript
+            st.session_state.latest_transcript = ""
+            st.session_state.messages.append({"role": "user", "content": query})
+            with st.spinner("🤔 Thinking..."):
+                response = process_query(query)
+                st.session_state.messages.append({"role": "assistant", "content": response})
+            st.rerun()
+
 # ── Auto-Process Voice Transcripts ────────────────────────────────────────────
 # This catches transcripts from the audio component and processes them
 if "pending_voice_query" not in st.session_state:
