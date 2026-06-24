@@ -35,7 +35,7 @@ def run_streamlit():
 
 threading.Thread(target=run_streamlit, daemon=True).start()
 log.info(f"Streamlit starting on port {STREAMLIT_PORT}...")
-time.sleep(5)  # Give Streamlit time to boot
+time.sleep(15)  # Give Streamlit time to boot
 
 app = FastAPI()
 
