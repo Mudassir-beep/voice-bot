@@ -214,8 +214,6 @@ if "interim_text" not in st.session_state:
     st.session_state.interim_text = ""
 if "is_listening" not in st.session_state:
     st.session_state.is_listening = False
-if "voice_transcript" not in st.session_state:
-    st.session_state.voice_transcript = ""
 
 # ── CSS ───────────────────────────────────────────────────────────────────────
 st.markdown("""
@@ -240,17 +238,6 @@ st.markdown("""
         70% { box-shadow: 0 0 0 20px rgba(79, 195, 247, 0); }
         100% { box-shadow: 0 0 0 0 rgba(79, 195, 247, 0); }
     }
-    .interim {
-        text-align: center;
-        padding: 10px;
-        color: #ff9800;
-        font-size: 16px;
-        font-style: italic;
-        min-height: 40px;
-        background: rgba(255, 152, 0, 0.1);
-        border-radius: 8px;
-        margin: 10px 0;
-    }
     .transcript-box {
         background: #f5f5f5;
         border-radius: 10px;
@@ -260,13 +247,6 @@ st.markdown("""
         border-left: 4px solid #4fc3f7;
         text-align: center;
         font-size: 16px;
-    }
-    .stChatInput {
-        position: sticky;
-        bottom: 0;
-        background: white;
-        padding: 10px 0;
-        border-top: 1px solid #eee;
     }
 </style>
 """, unsafe_allow_html=True)
@@ -307,11 +287,6 @@ if not DB_PATH.exists():
     st.stop()
 
 # ── Display Transcript ──────────────────────────────────────────────────────
-# Show interim transcript
-if st.session_state.interim_text:
-    st.markdown(f'<div class="interim">💬 {st.session_state.interim_text}</div>', unsafe_allow_html=True)
-
-# Show voice transcript display
 st.markdown('<div id="transcript-display" class="transcript-box">🎤 Click Start to speak</div>', unsafe_allow_html=True)
 
 # ── Chat Display ──────────────────────────────────────────────────────────────
@@ -340,59 +315,58 @@ let audioContext = null;
 let mediaStream = null;
 let sourceNode = null;
 let processorNode = null;
+let audioChunkCount = 0;
 
 function connectWebSocket() {{
-    try {{
-        ws = new WebSocket(WS_URL);
-        ws.onopen = function() {{
-            console.log('✅ WebSocket connected');
-            document.getElementById('status').textContent = '🟢 Connected';
-            document.getElementById('status').style.color = '#4caf50';
-        }};
-        ws.onmessage = function(event) {{
-            try {{
-                const data = JSON.parse(event.data);
-                console.log('📩 Received:', data);
-                if (data.type === 'transcript') {{
-                    const display = document.getElementById('transcript-display');
-                    if (data.is_final) {{
-                        display.innerHTML = '<span style="color:#4caf50;">✅ ' + data.text + '</span>';
-                        // Auto submit to chat
-                        const input = document.querySelector('[data-testid="stChatInput"] textarea');
-                        if (input) {{
-                            input.value = data.text;
-                            input.dispatchEvent(new Event('input', {{bubbles: true}}));
-                            setTimeout(() => {{
-                                const btn = document.querySelector('[data-testid="stChatInput"] button');
-                                if (btn) btn.click();
-                            }}, 300);
-                        }}
-                    }} else {{
-                        display.innerHTML = '<span style="color:#ff9800;">💭 ' + data.text + '</span>';
+    ws = new WebSocket(WS_URL);
+    ws.onopen = function() {{
+        console.log('✅ WebSocket connected');
+        document.getElementById('status').textContent = '✅ Connected - click Start';
+        document.getElementById('status').style.color = '#4caf50';
+    }};
+    ws.onmessage = function(event) {{
+        try {{
+            const data = JSON.parse(event.data);
+            console.log('📩 Received:', data);
+            
+            if (data.type === 'transcript') {{
+                const display = document.getElementById('transcript-display');
+                if (data.is_final) {{
+                    display.innerHTML = '<span style="color:#4caf50;">✅ ' + data.text + '</span>';
+                    // Auto submit to chat
+                    const input = document.querySelector('[data-testid="stChatInput"] textarea');
+                    if (input) {{
+                        input.value = data.text;
+                        input.dispatchEvent(new Event('input', {{bubbles: true}}));
+                        setTimeout(() => {{
+                            const btn = document.querySelector('[data-testid="stChatInput"] button');
+                            if (btn) btn.click();
+                        }}, 300);
                     }}
+                }} else {{
+                    display.innerHTML = '<span style="color:#ff9800;">💭 ' + data.text + '</span>';
                 }}
-                if (data.type === 'started') {{
-                    document.getElementById('status').textContent = '🎤 Listening...';
-                }}
-                if (data.type === 'error') {{
-                    document.getElementById('status').textContent = '❌ ' + data.message;
-                    document.getElementById('status').style.color = '#f44336';
-                }}
-            }} catch(e) {{ console.error('Parse error:', e); }}
-        }};
-        ws.onclose = function() {{
-            console.log('❌ WebSocket disconnected');
-            document.getElementById('status').textContent = '🔄 Reconnecting...';
-            setTimeout(connectWebSocket, 3000);
-        }};
-        ws.onerror = function(error) {{
-            console.error('WebSocket error:', error);
-            document.getElementById('status').textContent = '❌ Connection error';
-            document.getElementById('status').style.color = '#f44336';
-        }};
-    }} catch(e) {{
-        console.error('WebSocket creation error:', e);
-    }}
+            }}
+            if (data.type === 'started') {{
+                document.getElementById('status').textContent = '🎤 Listening...';
+                document.getElementById('status').style.color = '#4caf50';
+            }}
+            if (data.type === 'error') {{
+                document.getElementById('status').textContent = '❌ ' + data.message;
+                document.getElementById('status').style.color = '#f44336';
+            }}
+        }} catch(e) {{ console.error('Parse error:', e); }}
+    }};
+    ws.onclose = function() {{
+        console.log('❌ WebSocket disconnected');
+        document.getElementById('status').textContent = '🔄 Reconnecting...';
+        setTimeout(connectWebSocket, 3000);
+    }};
+    ws.onerror = function(error) {{
+        console.error('WebSocket error:', error);
+        document.getElementById('status').textContent = '❌ Connection error';
+        document.getElementById('status').style.color = '#f44336';
+    }};
 }}
 
 function toggleListening() {{
@@ -409,39 +383,83 @@ async function startListening() {{
         document.getElementById('status').style.color = '#f44336';
         return;
     }}
+    
     try {{
         document.getElementById('status').textContent = '🎤 Requesting microphone...';
+        document.getElementById('status').style.color = '#ff9800';
+        
         mediaStream = await navigator.mediaDevices.getUserMedia({{
-            audio: {{ sampleRate: 16000, channelCount: 1 }}
+            audio: {{
+                sampleRate: 16000,
+                channelCount: 1,
+                echoCancellation: true,
+                noiseSuppression: true,
+                autoGainControl: true
+            }}
         }});
-        audioContext = new AudioContext({{ sampleRate: 16000 }});
+        
+        console.log('✅ Microphone acquired');
+        
+        audioContext = new (window.AudioContext || window.webkitAudioContext)();
         await audioContext.resume();
+        
         sourceNode = audioContext.createMediaStreamSource(mediaStream);
         processorNode = audioContext.createScriptProcessor(4096, 1, 1);
+        
         processorNode.onaudioprocess = function(e) {{
-            if (!isListening || !ws || ws.readyState !== WebSocket.OPEN) return;
-            const inputData = e.inputBuffer.getChannelData(0);
-            const pcm = new Int16Array(inputData.length);
-            for (let i = 0; i < inputData.length; i++) {{
-                pcm[i] = Math.round(Math.max(-1, Math.min(1, inputData[i])) * 32767);
+            if (!isListening || !ws || ws.readyState !== WebSocket.OPEN) {{
+                return;
             }}
-            ws.send(JSON.stringify({{
-                type: 'audio',
-                data: btoa(String.fromCharCode(...new Uint8Array(pcm.buffer)))
-            }}));
+            
+            try {{
+                const inputData = e.inputBuffer.getChannelData(0);
+                const pcmData = new Int16Array(inputData.length);
+                for (let i = 0; i < inputData.length; i++) {{
+                    const sample = Math.max(-1, Math.min(1, inputData[i]));
+                    pcmData[i] = Math.round(sample * 32767);
+                }}
+                
+                const bytes = new Uint8Array(pcmData.buffer);
+                let binary = '';
+                for (let i = 0; i < bytes.length; i++) {{
+                    binary += String.fromCharCode(bytes[i]);
+                }}
+                const base64 = btoa(binary);
+                
+                ws.send(JSON.stringify({{
+                    type: 'audio',
+                    data: base64
+                }}));
+                
+                audioChunkCount++;
+                if (audioChunkCount % 10 === 0) {{
+                    console.log(`🎵 Sent ${{audioChunkCount}} audio chunks`);
+                }}
+            }} catch(err) {{
+                console.error('Audio processing error:', err);
+            }}
         }};
+        
         sourceNode.connect(processorNode);
         processorNode.connect(audioContext.destination);
+        
         ws.send(JSON.stringify({{type: 'start'}}));
+        
         isListening = true;
+        audioChunkCount = 0;
         document.getElementById('micBtn').textContent = '⏹️ Stop';
         document.getElementById('micBtn').style.background = 'linear-gradient(135deg, #f44336, #e91b5e)';
         document.getElementById('status').textContent = '🎤 Listening...';
         document.getElementById('status').style.color = '#4caf50';
         document.getElementById('avatar').className = 'avatar listening';
+        document.getElementById('transcript-display').innerHTML = '🎤 Listening... Speak now';
+        
+        // Update Streamlit state
+        stSessionState.is_listening = true;
+        
     }} catch(err) {{
         console.error('Microphone error:', err);
-        document.getElementById('status').textContent = '❌ Microphone access denied';
+        document.getElementById('status').textContent = '❌ Microphone error: ' + err.message;
         document.getElementById('status').style.color = '#f44336';
         alert('Please allow microphone access.\\n\\nError: ' + err.message);
     }}
@@ -449,20 +467,41 @@ async function startListening() {{
 
 function stopListening() {{
     isListening = false;
-    if (processorNode) {{ processorNode.disconnect(); processorNode = null; }}
-    if (sourceNode) {{ sourceNode.disconnect(); sourceNode = null; }}
-    if (mediaStream) {{ mediaStream.getTracks().forEach(t => t.stop()); mediaStream = null; }}
-    if (audioContext) {{ audioContext.close(); audioContext = null; }}
-    if (ws && ws.readyState === WebSocket.OPEN) {{
-        ws.send(JSON.stringify({{type: 'stop'}}));
+    
+    if (processorNode) {{
+        try {{ processorNode.disconnect(); }} catch(e) {{}}
+        processorNode = null;
     }}
+    if (sourceNode) {{
+        try {{ sourceNode.disconnect(); }} catch(e) {{}}
+        sourceNode = null;
+    }}
+    if (mediaStream) {{
+        mediaStream.getTracks().forEach(t => t.stop());
+        mediaStream = null;
+    }}
+    if (audioContext && audioContext.state !== 'closed') {{
+        try {{ audioContext.close(); }} catch(e) {{}}
+        audioContext = null;
+    }}
+    
+    if (ws && ws.readyState === WebSocket.OPEN) {{
+        try {{
+            ws.send(JSON.stringify({{type: 'stop'}}));
+        }} catch(e) {{}}
+    }}
+    
     document.getElementById('micBtn').textContent = '🎙 Start';
     document.getElementById('micBtn').style.background = 'linear-gradient(135deg, #4fc3f7, #7c4dff)';
     document.getElementById('status').textContent = '⏹️ Stopped';
     document.getElementById('status').style.color = '#888';
     document.getElementById('avatar').className = 'avatar';
+    
+    // Update Streamlit state
+    stSessionState.is_listening = false;
 }}
 
+// Initialize
 connectWebSocket();
 </script>
 
@@ -484,7 +523,7 @@ connectWebSocket();
 </div>
 """
 
-components.html(audio_html, height=300)
+components.html(audio_html, height=350)
 
 # ── Text Input ────────────────────────────────────────────────────────────────
 st.divider()
