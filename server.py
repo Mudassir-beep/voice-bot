@@ -73,21 +73,21 @@ async def deepgram_stream(session_id: str, client_ws: WebSocket, audio_q: asynci
         async with ws_lib.connect(uri, additional_headers=headers) as dg_ws:
             log.info(f"[{session_id}] Deepgram connected")
 
-        async def sender():
-    while True:
-        try:
-            chunk = await asyncio.wait_for(audio_q.get(), timeout=5.0)
-            if chunk is None:
-                break
-            await dg_ws.send(chunk)
-        except asyncio.TimeoutError:
-            try:
-                await dg_ws.send(json.dumps({"type": "KeepAlive"}))
-            except Exception:
-                break
-        except Exception as e:
-            log.error(f"[{session_id}] DG send error: {e}")
-            break
+            async def sender():
+                while True:
+                    try:
+                        chunk = await asyncio.wait_for(audio_q.get(), timeout=5.0)
+                        if chunk is None:
+                            break
+                        await dg_ws.send(chunk)
+                    except asyncio.TimeoutError:
+                        try:
+                            await dg_ws.send(json.dumps({"type": "KeepAlive"}))
+                        except Exception:
+                            break
+                    except Exception as e:
+                        log.error(f"[{session_id}] DG send error: {e}")
+                        break
 
             async def receiver():
                 async for msg in dg_ws:
@@ -111,7 +111,6 @@ async def deepgram_stream(session_id: str, client_ws: WebSocket, audio_q: asynci
 
     except Exception as e:
         log.error(f"[{session_id}] Deepgram error: {e}")
-
 
 # ── /ws — audio WebSocket ────────────────────────────────────────────────────
 @app.websocket("/ws")
@@ -151,7 +150,6 @@ async def audio_websocket(websocket: WebSocket):
         log.error(f"[{session_id}] Audio WS error: {e}")
     finally:
         await audio_q.put(None)
-
 
 # ── /{path} — proxy Streamlit WebSockets ────────────────────────────────────
 @app.websocket("/{path:path}")
@@ -200,7 +198,6 @@ async def proxy_websocket(websocket: WebSocket, path: str):
     except Exception as e:
         log.error(f"WS proxy error /{path}: {e}")
 
-
 # ── HTTP proxy to Streamlit ──────────────────────────────────────────────────
 @app.api_route("/{path:path}", methods=["GET", "POST", "PUT", "DELETE", "OPTIONS", "HEAD", "PATCH"])
 async def proxy_http(request: Request, path: str):
@@ -233,7 +230,6 @@ async def proxy_http(request: Request, path: str):
         except Exception as e:
             log.error(f"HTTP proxy error /{path}: {e}")
             return Response(content="Service starting...", status_code=503)
-
 
 if __name__ == "__main__":
     uvicorn.run("server:app", host="0.0.0.0", port=PORT)
