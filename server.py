@@ -21,11 +21,14 @@ PORT = int(os.environ.get("PORT", 8080))
 STREAMLIT_PORT = 8502
 STREAMLIT_URL = f"http://localhost:{STREAMLIT_PORT}"
 
+_streamlit_started = False
+_streamlit_lock = threading.Lock()
+
 # ── Start Streamlit in background thread ─────────────────────────────────────
 def run_streamlit():
     subprocess.run([
         sys.executable, "-m", "streamlit", "run", "app.py",
-        "--server.address=0.0.0.0",
+        "--server.address=127.0.0.1",
         f"--server.port={STREAMLIT_PORT}",
         "--server.headless=true",
         "--server.enableCORS=false",
@@ -33,17 +36,21 @@ def run_streamlit():
         "--server.enableWebsocketCompression=false",
     ])
 
-threading.Thread(target=run_streamlit, daemon=True).start()
-log.info("Waiting for Streamlit to start...")
-for i in range(30):
-    try:
-        r = httpx.get(f"http://localhost:{STREAMLIT_PORT}/_stcore/health", timeout=2)
-        if r.status_code == 200:
-            log.info("Streamlit is ready!")
-            break
-    except Exception:
-        pass
-    time.sleep(1)
+with _streamlit_lock:
+    global _streamlit_started
+    if not _streamlit_started:
+        _streamlit_started = True
+        threading.Thread(target=run_streamlit, daemon=True).start()
+        log.info("Waiting for Streamlit to start...")
+        for i in range(30):
+            try:
+                r = httpx.get(f"http://localhost:{STREAMLIT_PORT}/_stcore/health", timeout=2)
+                if r.status_code == 200:
+                    log.info("Streamlit is ready!")
+                    break
+            except Exception:
+                pass
+            time.sleep(1)
 
 app = FastAPI()
 
@@ -151,20 +158,25 @@ async def proxy_websocket(websocket: WebSocket, path: str):
     if query:
         url += f"?{query}"
 
+    log.info(f"WS proxy: {path} -> {url}")
+
     try:
         async with ws_lib.connect(url) as upstream:
             async def to_upstream():
                 try:
                     while True:
                         message = await websocket.receive()
-                        if message.get("type") == "websocket.disconnect":
+                        mtype = message.get("type")
+                        if mtype == "websocket.disconnect":
+                            log.info(f"WS client disconnected: {path}")
                             break
-                        if "text" in message and message["text"]:
-                            await upstream.send(message["text"])
-                        elif "bytes" in message and message["bytes"]:
-                            await upstream.send(message["bytes"])
+                        if mtype == "websocket.receive":
+                            if message.get("text"):
+                                await upstream.send(message["text"])
+                            elif message.get("bytes"):
+                                await upstream.send(message["bytes"])
                 except Exception as e:
-                    log.error(f"to_upstream error: {e}")
+                    log.error(f"to_upstream error [{path}]: {e}")
 
             async def to_client():
                 try:
@@ -174,7 +186,7 @@ async def proxy_websocket(websocket: WebSocket, path: str):
                         else:
                             await websocket.send_text(msg)
                 except Exception as e:
-                    log.error(f"to_client error: {e}")
+                    log.error(f"to_client error [{path}]: {e}")
 
             await asyncio.gather(to_upstream(), to_client())
 
@@ -189,7 +201,11 @@ async def proxy_http(request: Request, path: str):
     if request.url.query:
         url += f"?{request.url.query}"
 
-    headers = {k: v for k, v in request.headers.items() if k.lower() != "host"}
+    # Strip compression headers so we get raw uncompressed response
+    headers = {
+        k: v for k, v in request.headers.items()
+        if k.lower() not in ("host", "accept-encoding")
+    }
 
     async with httpx.AsyncClient(timeout=30) as client:
         try:
@@ -199,10 +215,15 @@ async def proxy_http(request: Request, path: str):
                 headers=headers,
                 content=await request.body(),
             )
+            # Strip content-encoding and content-length to avoid mismatch
+            resp_headers = {
+                k: v for k, v in resp.headers.items()
+                if k.lower() not in ("content-encoding", "content-length", "transfer-encoding")
+            }
             return Response(
                 content=resp.content,
                 status_code=resp.status_code,
-                headers=dict(resp.headers),
+                headers=resp_headers,
             )
         except Exception as e:
             log.error(f"HTTP proxy error /{path}: {e}")
@@ -211,4 +232,3 @@ async def proxy_http(request: Request, path: str):
 
 if __name__ == "__main__":
     uvicorn.run("server:app", host="0.0.0.0", port=PORT)
-
