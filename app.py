@@ -11,11 +11,6 @@ import streamlit as st
 from groq import Groq
 from sentence_transformers import SentenceTransformer
 import streamlit.components.v1 as components
-import json
-import asyncio
-import websockets
-import base64
-import time
 
 logging.basicConfig(level=logging.INFO)
 log = logging.getLogger("reem")
@@ -221,8 +216,6 @@ if "is_listening" not in st.session_state:
     st.session_state.is_listening = False
 if "voice_transcript" not in st.session_state:
     st.session_state.voice_transcript = ""
-if "last_voice_message" not in st.session_state:
-    st.session_state.last_voice_message = ""
 
 # ── CSS ───────────────────────────────────────────────────────────────────────
 st.markdown("""
@@ -258,9 +251,15 @@ st.markdown("""
         border-radius: 8px;
         margin: 10px 0;
     }
-    .transcript-final {
-        color: #4caf50;
-        font-weight: 500;
+    .transcript-box {
+        background: #f5f5f5;
+        border-radius: 10px;
+        padding: 15px;
+        margin: 10px 0;
+        min-height: 50px;
+        border-left: 4px solid #4fc3f7;
+        text-align: center;
+        font-size: 16px;
     }
     .stChatInput {
         position: sticky;
@@ -278,7 +277,7 @@ with col2:
     avatar_class = "avatar listening" if st.session_state.is_listening else "avatar"
     st.markdown(f'<div class="{avatar_class}">👩‍💼</div>', unsafe_allow_html=True)
     st.title("Reem")
-    st.caption("Bin Dawood Holdings - Voice Agent (Continuous Streaming)")
+    st.caption("Bin Dawood Holdings - Voice Agent")
 st.divider()
 
 # ── Language Selection ────────────────────────────────────────────────────────
@@ -307,9 +306,13 @@ if not DB_PATH.exists():
         st.rerun()
     st.stop()
 
-# ── Display Interim Transcript ──────────────────────────────────────────────
+# ── Display Transcript ──────────────────────────────────────────────────────
+# Show interim transcript
 if st.session_state.interim_text:
     st.markdown(f'<div class="interim">💬 {st.session_state.interim_text}</div>', unsafe_allow_html=True)
+
+# Show voice transcript display
+st.markdown('<div id="transcript-display" class="transcript-box">🎤 Click Start to speak</div>', unsafe_allow_html=True)
 
 # ── Chat Display ──────────────────────────────────────────────────────────────
 for msg in st.session_state.messages:
@@ -327,7 +330,7 @@ elif render_domain:
 else:
     ws_url = f"ws://localhost:{PORT}/ws"
 
-# ── Audio Component with Transcript Handling ────────────────────────────────
+# ── Audio Component ───────────────────────────────────────────────────────────
 audio_html = f"""
 <script>
 const WS_URL = '{ws_url}';
@@ -339,71 +342,57 @@ let sourceNode = null;
 let processorNode = null;
 
 function connectWebSocket() {{
-    ws = new WebSocket(WS_URL);
-    ws.onopen = function() {{
-        console.log('✅ WebSocket connected');
-        updateStatus('🟢 Connected - click Start');
-    }};
-    ws.onmessage = function(event) {{
-        try {{
-            const data = JSON.parse(event.data);
-            console.log('📩 Received from server:', data);
-            
-            // Handle transcripts
-            if (data.type === 'transcript') {{
-                const statusDiv = document.getElementById('status');
-                const transcriptDiv = document.getElementById('transcript-display');
-                
-                if (data.is_final) {{
-                    // Final transcript - send to Streamlit
-                    console.log('✅ Final transcript:', data.text);
-                    if (statusDiv) {{
-                        statusDiv.textContent = '📝 ' + data.text;
-                        statusDiv.style.color = '#4caf50';
-                    }}
-                    if (transcriptDiv) {{
-                        transcriptDiv.innerHTML = `<span style="color:#4caf50; font-weight:bold;">✅ ${{data.text}}</span>`;
-                    }}
-                    
-                    // Send to Streamlit via custom event
-                    const customEvent = new CustomEvent('voice_transcript', {{
-                        detail: {{ text: data.text }}
-                    }});
-                    window.dispatchEvent(customEvent);
-                }} else {{
-                    // Interim transcript
-                    console.log('💭 Interim:', data.text);
-                    if (statusDiv) {{
-                        statusDiv.textContent = '💭 ' + data.text;
-                        statusDiv.style.color = '#ff9800';
-                    }}
-                    if (transcriptDiv) {{
-                        transcriptDiv.innerHTML = `<span style="color:#ff9800; font-style:italic;">💭 ${{data.text}}</span>`;
+    try {{
+        ws = new WebSocket(WS_URL);
+        ws.onopen = function() {{
+            console.log('✅ WebSocket connected');
+            document.getElementById('status').textContent = '🟢 Connected';
+            document.getElementById('status').style.color = '#4caf50';
+        }};
+        ws.onmessage = function(event) {{
+            try {{
+                const data = JSON.parse(event.data);
+                console.log('📩 Received:', data);
+                if (data.type === 'transcript') {{
+                    const display = document.getElementById('transcript-display');
+                    if (data.is_final) {{
+                        display.innerHTML = '<span style="color:#4caf50;">✅ ' + data.text + '</span>';
+                        // Auto submit to chat
+                        const input = document.querySelector('[data-testid="stChatInput"] textarea');
+                        if (input) {{
+                            input.value = data.text;
+                            input.dispatchEvent(new Event('input', {{bubbles: true}}));
+                            setTimeout(() => {{
+                                const btn = document.querySelector('[data-testid="stChatInput"] button');
+                                if (btn) btn.click();
+                            }}, 300);
+                        }}
+                    }} else {{
+                        display.innerHTML = '<span style="color:#ff9800;">💭 ' + data.text + '</span>';
                     }}
                 }}
-            }}
-            
-            if (data.type === 'error') {{
-                updateStatus('❌ Error: ' + data.message);
-            }}
-        }} catch(e) {{
-            console.error('Message parse error:', e);
-        }}
-    }};
-    ws.onclose = function() {{
-        console.log('❌ WebSocket disconnected');
-        updateStatus('🔄 Reconnecting...');
-        setTimeout(connectWebSocket, 2000);
-    }};
-    ws.onerror = function(error) {{
-        console.error('WebSocket error:', error);
-        updateStatus('❌ Connection error');
-    }};
-}}
-
-function updateStatus(msg) {{
-    const statusDiv = document.getElementById('status');
-    if (statusDiv) statusDiv.textContent = msg;
+                if (data.type === 'started') {{
+                    document.getElementById('status').textContent = '🎤 Listening...';
+                }}
+                if (data.type === 'error') {{
+                    document.getElementById('status').textContent = '❌ ' + data.message;
+                    document.getElementById('status').style.color = '#f44336';
+                }}
+            }} catch(e) {{ console.error('Parse error:', e); }}
+        }};
+        ws.onclose = function() {{
+            console.log('❌ WebSocket disconnected');
+            document.getElementById('status').textContent = '🔄 Reconnecting...';
+            setTimeout(connectWebSocket, 3000);
+        }};
+        ws.onerror = function(error) {{
+            console.error('WebSocket error:', error);
+            document.getElementById('status').textContent = '❌ Connection error';
+            document.getElementById('status').style.color = '#f44336';
+        }};
+    }} catch(e) {{
+        console.error('WebSocket creation error:', e);
+    }}
 }}
 
 function toggleListening() {{
@@ -415,122 +404,70 @@ function toggleListening() {{
 }}
 
 async function startListening() {{
+    if (!ws || ws.readyState !== WebSocket.OPEN) {{
+        document.getElementById('status').textContent = '❌ WebSocket not connected';
+        document.getElementById('status').style.color = '#f44336';
+        return;
+    }}
     try {{
-        updateStatus('🎤 Requesting microphone...');
+        document.getElementById('status').textContent = '🎤 Requesting microphone...';
         mediaStream = await navigator.mediaDevices.getUserMedia({{
-            audio: {{
-                sampleRate: 16000,
-                channelCount: 1,
-                echoCancellation: true,
-                noiseSuppression: true,
-                autoGainControl: true
-            }}
+            audio: {{ sampleRate: 16000, channelCount: 1 }}
         }});
-
-        audioContext = new (window.AudioContext || window.webkitAudioContext)({{
-            sampleRate: 16000
-        }});
+        audioContext = new AudioContext({{ sampleRate: 16000 }});
         await audioContext.resume();
-
         sourceNode = audioContext.createMediaStreamSource(mediaStream);
         processorNode = audioContext.createScriptProcessor(4096, 1, 1);
-
         processorNode.onaudioprocess = function(e) {{
             if (!isListening || !ws || ws.readyState !== WebSocket.OPEN) return;
             const inputData = e.inputBuffer.getChannelData(0);
             const pcm = new Int16Array(inputData.length);
             for (let i = 0; i < inputData.length; i++) {{
-                let sample = Math.max(-1, Math.min(1, inputData[i]));
-                pcm[i] = Math.round(sample * 32767);
+                pcm[i] = Math.round(Math.max(-1, Math.min(1, inputData[i])) * 32767);
             }}
-            const base64 = btoa(String.fromCharCode(...new Uint8Array(pcm.buffer)));
-            ws.send(JSON.stringify({{type: 'audio', data: base64}}));
+            ws.send(JSON.stringify({{
+                type: 'audio',
+                data: btoa(String.fromCharCode(...new Uint8Array(pcm.buffer)))
+            }}));
         }};
-
         sourceNode.connect(processorNode);
         processorNode.connect(audioContext.destination);
-
-        if (ws && ws.readyState === WebSocket.OPEN) {{
-            ws.send(JSON.stringify({{type: 'start'}}));
-        }}
-
+        ws.send(JSON.stringify({{type: 'start'}}));
         isListening = true;
-        st.sessionState.is_listening = true;
         document.getElementById('micBtn').textContent = '⏹️ Stop';
-        document.getElementById('micBtn').style.background = 'linear-gradient(135deg, #f44336, #e91e63)';
-        document.getElementById('status').textContent = '🎤 Listening... Speak naturally';
+        document.getElementById('micBtn').style.background = 'linear-gradient(135deg, #f44336, #e91b5e)';
+        document.getElementById('status').textContent = '🎤 Listening...';
+        document.getElementById('status').style.color = '#4caf50';
         document.getElementById('avatar').className = 'avatar listening';
-        
-        // Clear previous transcript
-        const transcriptDiv = document.getElementById('transcript-display');
-        if (transcriptDiv) {{
-            transcriptDiv.innerHTML = '🎤 Listening...';
-        }}
-
     }} catch(err) {{
         console.error('Microphone error:', err);
-        updateStatus('❌ Microphone access denied');
-        alert('Please allow microphone access to use voice input.');
+        document.getElementById('status').textContent = '❌ Microphone access denied';
+        document.getElementById('status').style.color = '#f44336';
+        alert('Please allow microphone access.\\n\\nError: ' + err.message);
     }}
 }}
 
 function stopListening() {{
     isListening = false;
-    st.sessionState.is_listening = false;
-
     if (processorNode) {{ processorNode.disconnect(); processorNode = null; }}
     if (sourceNode) {{ sourceNode.disconnect(); sourceNode = null; }}
     if (mediaStream) {{ mediaStream.getTracks().forEach(t => t.stop()); mediaStream = null; }}
-    if (audioContext && audioContext.state !== 'closed') {{ audioContext.close(); audioContext = null; }}
-
+    if (audioContext) {{ audioContext.close(); audioContext = null; }}
     if (ws && ws.readyState === WebSocket.OPEN) {{
         ws.send(JSON.stringify({{type: 'stop'}}));
     }}
-
     document.getElementById('micBtn').textContent = '🎙 Start';
     document.getElementById('micBtn').style.background = 'linear-gradient(135deg, #4fc3f7, #7c4dff)';
     document.getElementById('status').textContent = '⏹️ Stopped';
+    document.getElementById('status').style.color = '#888';
     document.getElementById('avatar').className = 'avatar';
 }}
 
-// Handle voice transcript from WebSocket
-window.addEventListener('voice_transcript', function(e) {{
-    const text = e.detail.text;
-    console.log('🎤 Voice transcript received:', text);
-    
-    // Update Streamlit state via st.setComponentValue
-    const input = document.querySelector('[data-testid="stChatInput"] textarea');
-    if (input) {{
-        input.value = text;
-        input.dispatchEvent(new Event('input', {{ bubbles: true }}));
-        
-        // Auto-submit
-        setTimeout(() => {{
-            const button = document.querySelector('[data-testid="stChatInput"] button');
-            if (button) {{
-                button.click();
-            }}
-        }}, 500);
-    }}
-}});
-
-// Connect WebSocket when page loads
 connectWebSocket();
 </script>
 
 <div style="display:flex; flex-direction:column; align-items:center; gap:15px; padding:10px;">
     <div id="avatar" class="avatar">👩‍💼</div>
-    <div id="transcript-display" style="
-        background: #f5f5f5;
-        border-radius: 10px;
-        padding: 15px;
-        margin: 10px 0;
-        min-height: 50px;
-        width: 100%;
-        text-align: center;
-        border-left: 4px solid #4fc3f7;
-        font-size: 16px;
-    ">🎤 Click Start to speak</div>
     <button id="micBtn" onclick="toggleListening()" style="
         padding: 16px 48px;
         border-radius: 50px;
@@ -547,7 +484,7 @@ connectWebSocket();
 </div>
 """
 
-components.html(audio_html, height=350)
+components.html(audio_html, height=300)
 
 # ── Text Input ────────────────────────────────────────────────────────────────
 st.divider()
