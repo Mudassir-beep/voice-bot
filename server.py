@@ -56,97 +56,139 @@ app = FastAPI()
 # ── Deepgram streaming ───────────────────────────────────────────────────────
 async def deepgram_stream(session_id: str, client_ws: WebSocket, audio_q: asyncio.Queue):
     if not DEEPGRAM_API_KEY:
-        log.error("No Deepgram API key")
+        log.error(f"[{session_id}] ❌ No Deepgram API key!")
+        await client_ws.send_json({"type": "error", "message": "Deepgram API key missing"})
         return
 
+    log.info(f"[{session_id}] 🚀 Connecting to Deepgram...")
+    
     params = (
         "model=nova-2&punctuate=true&interim_results=true"
         "&utterance_end_ms=1000&vad_events=true&smart_format=true"
         "&encoding=linear16&sample_rate=16000&channels=1&endpointing=true"
     )
-    headers = {"Authorization": f"Token {DEEPGRAM_API_KEY}"}
+    
+    # ✅ FIX: Use the correct format for websockets library
+    # The websockets library uses 'additional_headers' not 'extra_headers'
+    headers = [
+        ("Authorization", f"Token {DEEPGRAM_API_KEY}")
+    ]
+    
+    uri = f"wss://api.deepgram.com/v1/listen?{params}"
 
     try:
-        async with ws_lib.connect(
-            f"wss://api.deepgram.com/v1/listen?{params}",
-            extra_headers=headers
-        ) as dg_ws:
-            log.info(f"[{session_id}] Deepgram connected")
+        # ✅ FIXED: Use additional_headers instead of extra_headers
+        async with ws_lib.connect(uri, additional_headers=headers) as dg_ws:
+            log.info(f"[{session_id}] ✅ Deepgram connected!")
 
             async def sender():
+                chunk_count = 0
                 while True:
                     chunk = await audio_q.get()
                     if chunk is None:
+                        log.info(f"[{session_id}] 📤 Audio stream ended (sent {chunk_count} chunks)")
                         break
+                    chunk_count += 1
+                    if chunk_count % 50 == 0:
+                        log.info(f"[{session_id}] 📤 Sent {chunk_count} audio chunks")
                     try:
                         await dg_ws.send(chunk)
                     except Exception as e:
-                        log.error(f"[{session_id}] DG send error: {e}")
+                        log.error(f"[{session_id}] ❌ Send error: {e}")
                         break
 
             async def receiver():
-                async for msg in dg_ws:
+                while True:
                     try:
+                        msg = await asyncio.wait_for(dg_ws.recv(), timeout=30)
                         data = json.loads(msg)
+                        
                         if data.get("type") == "Results":
                             alts = data.get("channel", {}).get("alternatives", [{}])
                             text = alts[0].get("transcript", "").strip() if alts else ""
                             is_final = data.get("is_final", False)
-                            if text and is_final:
-                                log.info(f"[{session_id}] transcript: {text}")
-                                await client_ws.send_json({
-                                    "type": "transcript",
-                                    "text": text,
-                                    "is_final": True
-                                })
+                            
+                            if text:
+                                log.info(f"[{session_id}] 🎤 Transcript: '{text}' (final={is_final})")
+                                if is_final:
+                                    await client_ws.send_json({
+                                        "type": "transcript",
+                                        "text": text,
+                                        "is_final": True
+                                    })
+                    except asyncio.TimeoutError:
+                        # Keep connection alive with ping
+                        continue
                     except Exception as e:
-                        log.error(f"[{session_id}] DG recv error: {e}")
+                        log.error(f"[{session_id}] ❌ Receive error: {e}")
+                        break
 
+            # Run sender and receiver concurrently
             await asyncio.gather(sender(), receiver())
 
     except Exception as e:
-        log.error(f"[{session_id}] Deepgram error: {e}")
-
+        log.error(f"[{session_id}] ❌ Deepgram connection error: {e}")
+        await client_ws.send_json({"type": "error", "message": f"Deepgram error: {str(e)}"})
 
 # ── /ws — audio WebSocket ────────────────────────────────────────────────────
 @app.websocket("/ws")
 async def audio_websocket(websocket: WebSocket):
     await websocket.accept()
     session_id = str(id(websocket))
+    log.info(f"[{session_id}] 🔌 Audio client connected")
+    
     audio_q: asyncio.Queue = asyncio.Queue()
     dg_task = None
-    log.info(f"[{session_id}] Audio client connected")
+    audio_chunk_count = 0
 
     try:
         async for raw in websocket.iter_text():
-            data = json.loads(raw)
-            msg_type = data.get("type")
+            try:
+                data = json.loads(raw)
+                msg_type = data.get("type")
+                
+                if msg_type == "ping":
+                    log.info(f"[{session_id}] 🏓 Ping received")
+                    await websocket.send_json({"type": "pong"})
 
-            if msg_type == "start":
-                audio_q = asyncio.Queue()
-                dg_task = asyncio.create_task(
-                    deepgram_stream(session_id, websocket, audio_q)
-                )
+                elif msg_type == "start":
+                    log.info(f"[{session_id}] 🎤 Start received")
+                    audio_q = asyncio.Queue()
+                    dg_task = asyncio.create_task(
+                        deepgram_stream(session_id, websocket, audio_q)
+                    )
+                    await websocket.send_json({"type": "started"})
 
-            elif msg_type == "audio":
-                audio_bytes = base64.b64decode(data.get("data", ""))
-                await audio_q.put(audio_bytes)
+                elif msg_type == "audio":
+                    audio_chunk_count += 1
+                    if audio_chunk_count % 50 == 0:
+                        log.info(f"[{session_id}] 🎵 Received {audio_chunk_count} audio chunks")
+                    audio_bytes = base64.b64decode(data.get("data", ""))
+                    await audio_q.put(audio_bytes)
 
-            elif msg_type == "stop":
-                await audio_q.put(None)
-                if dg_task:
-                    try:
-                        await asyncio.wait_for(dg_task, timeout=3.0)
-                    except asyncio.TimeoutError:
-                        dg_task.cancel()
+                elif msg_type == "stop":
+                    log.info(f"[{session_id}] ⏹️ Stop received (total chunks: {audio_chunk_count})")
+                    await audio_q.put(None)
+                    if dg_task:
+                        try:
+                            await asyncio.wait_for(dg_task, timeout=3.0)
+                        except asyncio.TimeoutError:
+                            dg_task.cancel()
+                    await websocket.send_json({"type": "stopped"})
+                    
+            except json.JSONDecodeError:
+                log.error(f"[{session_id}] ❌ Invalid JSON: {raw[:100]}")
+            except Exception as e:
+                log.error(f"[{session_id}] ❌ Message error: {e}")
 
     except WebSocketDisconnect:
-        log.info(f"[{session_id}] Audio client disconnected")
+        log.info(f"[{session_id}] 🔌 Audio client disconnected")
     except Exception as e:
-        log.error(f"[{session_id}] Audio WS error: {e}")
+        log.error(f"[{session_id}] ❌ Audio WS error: {e}")
     finally:
         await audio_q.put(None)
-
+        if dg_task:
+            dg_task.cancel()
 
 # ── /{path} — proxy Streamlit WebSockets ────────────────────────────────────
 @app.websocket("/{path:path}")
@@ -196,7 +238,6 @@ async def proxy_websocket(websocket: WebSocket, path: str):
     except Exception as e:
         log.error(f"WS proxy error /{path}: {e}")
 
-
 # ── HTTP proxy to Streamlit ──────────────────────────────────────────────────
 @app.api_route("/{path:path}", methods=["GET", "POST", "PUT", "DELETE", "OPTIONS", "HEAD", "PATCH"])
 async def proxy_http(request: Request, path: str):
@@ -229,7 +270,6 @@ async def proxy_http(request: Request, path: str):
         except Exception as e:
             log.error(f"HTTP proxy error /{path}: {e}")
             return Response(content="Service starting...", status_code=503)
-
 
 if __name__ == "__main__":
     uvicorn.run("server:app", host="0.0.0.0", port=PORT)
