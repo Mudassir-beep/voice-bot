@@ -76,19 +76,39 @@ async def deepgram_stream(session_id: str, client_ws: WebSocket, audio_q: asynci
             log.info(f"[{session_id}] ✅ Deepgram connected successfully!")
 
             async def sender():
-                chunk_count = 0
-                log.info(f"[{session_id}] 📤 Sender task started, waiting for audio...")
-                while True:
-                    try:
-                        # Get audio chunk from queue
-                        chunk = await asyncio.wait_for(audio_q.get(), timeout=3.0)
-                        if chunk is None:
-                            log.info(f"[{session_id}] 📤 Received None (stop signal), closing sender")
-                            break
-                        
-                        chunk_count += 1
-                        log.info(f"[{session_id}] 📤 Sending chunk #{chunk_count} ({len(chunk)} bytes) to Deepgram")
-                        
+    chunk_count = 0
+    log.info(f"[{session_id}] 📤 Sender task started, waiting for audio...")
+    while True:
+        try:
+            # Get audio chunk from queue
+            chunk = await asyncio.wait_for(audio_q.get(), timeout=3.0)
+            if chunk is None:
+                log.info(f"[{session_id}] 📤 Received None (stop signal), closing sender")
+                break
+            
+            chunk_count += 1
+            
+            # IMPORTANT: Send as BINARY frame, not text
+            # The chunk is already bytes from base64 decoding
+            await dg_ws.send(chunk)  # This sends as binary
+            
+            if chunk_count % 10 == 0:
+                log.info(f"[{session_id}] 📤 Sent chunk #{chunk_count} ({len(chunk)} bytes) to Deepgram (BINARY)")
+                
+        except asyncio.TimeoutError:
+            # Send keepalive as TEXT frame (JSON)
+            try:
+                await dg_ws.send(json.dumps({"type": "KeepAlive"}))
+                if chunk_count % 10 == 0:
+                    log.info(f"[{session_id}] 💓 Sent keepalive")
+            except Exception as e:
+                log.error(f"[{session_id}] ❌ Keepalive error: {e}")
+                break
+        except Exception as e:
+            log.error(f"[{session_id}] ❌ Sender error: {e}")
+            break
+    
+    log.info(f"[{session_id}] 📤 Sender finished. Total chunks: {chunk_count}")                        
                         # Send to Deepgram
                         await dg_ws.send(chunk)
                         
@@ -173,13 +193,14 @@ async def audio_websocket(websocket: WebSocket):
                     dg_task = asyncio.create_task(
                         deepgram_stream(session_id, websocket, audio_q)
                     )
-                    log.info(f"[{session_id}] ✅ Deepgram task created")
 
                 elif msg_type == "audio":
+                    # Decode base64 to bytes
                     audio_bytes = base64.b64decode(data.get("data", ""))
                     log.info(f"[{session_id}] 🎵 Audio chunk received: {len(audio_bytes)} bytes")
+                    
+                    # Put the raw bytes into the queue
                     await audio_q.put(audio_bytes)
-                    log.info(f"[{session_id}] ✅ Audio chunk queued")
 
                 elif msg_type == "stop":
                     log.info(f"[{session_id}] 🛑 Stop received")
@@ -187,9 +208,7 @@ async def audio_websocket(websocket: WebSocket):
                     if dg_task:
                         try:
                             await asyncio.wait_for(dg_task, timeout=3.0)
-                            log.info(f"[{session_id}] ✅ Deepgram task completed")
                         except asyncio.TimeoutError:
-                            log.info(f"[{session_id}] ⏰ Deepgram task timeout, cancelling")
                             dg_task.cancel()
 
             except json.JSONDecodeError as e:
@@ -204,6 +223,7 @@ async def audio_websocket(websocket: WebSocket):
     finally:
         await audio_q.put(None)
         log.info(f"[{session_id}] 🧹 Cleanup complete")
+        
 # ── /{path} — proxy Streamlit WebSockets ────────────────────────────────────
 @app.websocket("/{path:path}")
 async def proxy_websocket(websocket: WebSocket, path: str):
