@@ -331,7 +331,6 @@ function connectWebSocket() {{
                 console.log('📝 Transcript:', data.text);
                 document.getElementById('status').textContent = '📝 ' + data.text;
                 document.getElementById('status').style.color = '#ff9800';
-                // Auto-submit to chat
                 const input = document.querySelector('[data-testid="stChatInput"] textarea');
                 if (input) {{
                     input.value = data.text;
@@ -383,14 +382,16 @@ async function startListening() {{
         }});
         console.log('✅ Microphone granted');
 
-        audioContext = new (window.AudioContext || window.webkitAudioContext)();
+        // FORCE 16kHz sample rate
+        audioContext = new (window.AudioContext || window.webkitAudioContext)({{
+            sampleRate: 16000
+        }});
         await audioContext.resume();
         console.log('✅ Audio context resumed, sample rate:', audioContext.sampleRate);
 
         source = audioContext.createMediaStreamSource(mediaStream);
         processor = audioContext.createScriptProcessor(2048, 1, 1);
 
-        let audioData = [];
         let lastSendTime = 0;
 
         processor.onaudioprocess = function(e) {{
@@ -436,7 +437,7 @@ async function startListening() {{
             // Send audio
             try {{
                 ws.send(JSON.stringify({{type: 'audio', data: base64}}));
-                console.log('📤 Sent audio chunk:', Math.round(base64.length / 1024), 'KB');
+                console.log('📤 Sent audio chunk');
             }} catch(err) {{
                 console.error('Send error:', err);
             }}
