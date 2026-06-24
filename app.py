@@ -11,6 +11,11 @@ import streamlit as st
 from groq import Groq
 from sentence_transformers import SentenceTransformer
 import streamlit.components.v1 as components
+import json
+import asyncio
+import websockets
+import base64
+import time
 
 logging.basicConfig(level=logging.INFO)
 log = logging.getLogger("reem")
@@ -203,6 +208,7 @@ st.set_page_config(
     initial_sidebar_state="collapsed"
 )
 
+# Initialize session state
 if "messages" not in st.session_state:
     st.session_state.messages = []
 if "lang" not in st.session_state:
@@ -213,6 +219,10 @@ if "interim_text" not in st.session_state:
     st.session_state.interim_text = ""
 if "is_listening" not in st.session_state:
     st.session_state.is_listening = False
+if "voice_transcript" not in st.session_state:
+    st.session_state.voice_transcript = ""
+if "last_voice_message" not in st.session_state:
+    st.session_state.last_voice_message = ""
 
 # ── CSS ───────────────────────────────────────────────────────────────────────
 st.markdown("""
@@ -247,6 +257,17 @@ st.markdown("""
         background: rgba(255, 152, 0, 0.1);
         border-radius: 8px;
         margin: 10px 0;
+    }
+    .transcript-final {
+        color: #4caf50;
+        font-weight: 500;
+    }
+    .stChatInput {
+        position: sticky;
+        bottom: 0;
+        background: white;
+        padding: 10px 0;
+        border-top: 1px solid #eee;
     }
 </style>
 """, unsafe_allow_html=True)
@@ -286,7 +307,7 @@ if not DB_PATH.exists():
         st.rerun()
     st.stop()
 
-# ── Interim Transcript ────────────────────────────────────────────────────────
+# ── Display Interim Transcript ──────────────────────────────────────────────
 if st.session_state.interim_text:
     st.markdown(f'<div class="interim">💬 {st.session_state.interim_text}</div>', unsafe_allow_html=True)
 
@@ -306,7 +327,7 @@ elif render_domain:
 else:
     ws_url = f"ws://localhost:{PORT}/ws"
 
-# ── Audio Component ───────────────────────────────────────────────────────────
+# ── Audio Component with Transcript Handling ────────────────────────────────
 audio_html = f"""
 <script>
 const WS_URL = '{ws_url}';
@@ -321,14 +342,49 @@ function connectWebSocket() {{
     ws = new WebSocket(WS_URL);
     ws.onopen = function() {{
         console.log('✅ WebSocket connected');
-        document.getElementById('status').textContent = '🟢 Connected - click Start';
+        updateStatus('🟢 Connected - click Start');
     }};
     ws.onmessage = function(event) {{
         try {{
             const data = JSON.parse(event.data);
-            if (data.type === 'transcript' && data.is_final && data.text) {{
-                console.log('📝 Transcript:', data.text);
-                document.getElementById('status').textContent = '📝 ' + data.text;
+            console.log('📩 Received from server:', data);
+            
+            // Handle transcripts
+            if (data.type === 'transcript') {{
+                const statusDiv = document.getElementById('status');
+                const transcriptDiv = document.getElementById('transcript-display');
+                
+                if (data.is_final) {{
+                    // Final transcript - send to Streamlit
+                    console.log('✅ Final transcript:', data.text);
+                    if (statusDiv) {{
+                        statusDiv.textContent = '📝 ' + data.text;
+                        statusDiv.style.color = '#4caf50';
+                    }}
+                    if (transcriptDiv) {{
+                        transcriptDiv.innerHTML = `<span style="color:#4caf50; font-weight:bold;">✅ ${{data.text}}</span>`;
+                    }}
+                    
+                    // Send to Streamlit via custom event
+                    const customEvent = new CustomEvent('voice_transcript', {{
+                        detail: {{ text: data.text }}
+                    }});
+                    window.dispatchEvent(customEvent);
+                }} else {{
+                    // Interim transcript
+                    console.log('💭 Interim:', data.text);
+                    if (statusDiv) {{
+                        statusDiv.textContent = '💭 ' + data.text;
+                        statusDiv.style.color = '#ff9800';
+                    }}
+                    if (transcriptDiv) {{
+                        transcriptDiv.innerHTML = `<span style="color:#ff9800; font-style:italic;">💭 ${{data.text}}</span>`;
+                    }}
+                }}
+            }}
+            
+            if (data.type === 'error') {{
+                updateStatus('❌ Error: ' + data.message);
             }}
         }} catch(e) {{
             console.error('Message parse error:', e);
@@ -336,13 +392,18 @@ function connectWebSocket() {{
     }};
     ws.onclose = function() {{
         console.log('❌ WebSocket disconnected');
-        document.getElementById('status').textContent = '🔄 Reconnecting...';
+        updateStatus('🔄 Reconnecting...');
         setTimeout(connectWebSocket, 2000);
     }};
     ws.onerror = function(error) {{
         console.error('WebSocket error:', error);
-        document.getElementById('status').textContent = '❌ Connection error';
+        updateStatus('❌ Connection error');
     }};
+}}
+
+function updateStatus(msg) {{
+    const statusDiv = document.getElementById('status');
+    if (statusDiv) statusDiv.textContent = msg;
 }}
 
 function toggleListening() {{
@@ -355,6 +416,7 @@ function toggleListening() {{
 
 async function startListening() {{
     try {{
+        updateStatus('🎤 Requesting microphone...');
         mediaStream = await navigator.mediaDevices.getUserMedia({{
             audio: {{
                 sampleRate: 16000,
@@ -393,20 +455,28 @@ async function startListening() {{
         }}
 
         isListening = true;
+        st.sessionState.is_listening = true;
         document.getElementById('micBtn').textContent = '⏹️ Stop';
         document.getElementById('micBtn').style.background = 'linear-gradient(135deg, #f44336, #e91e63)';
         document.getElementById('status').textContent = '🎤 Listening... Speak naturally';
         document.getElementById('avatar').className = 'avatar listening';
+        
+        // Clear previous transcript
+        const transcriptDiv = document.getElementById('transcript-display');
+        if (transcriptDiv) {{
+            transcriptDiv.innerHTML = '🎤 Listening...';
+        }}
 
     }} catch(err) {{
         console.error('Microphone error:', err);
-        document.getElementById('status').textContent = '❌ Microphone access denied';
+        updateStatus('❌ Microphone access denied');
         alert('Please allow microphone access to use voice input.');
     }}
 }}
 
 function stopListening() {{
     isListening = false;
+    st.sessionState.is_listening = false;
 
     if (processorNode) {{ processorNode.disconnect(); processorNode = null; }}
     if (sourceNode) {{ sourceNode.disconnect(); sourceNode = null; }}
@@ -423,11 +493,44 @@ function stopListening() {{
     document.getElementById('avatar').className = 'avatar';
 }}
 
+// Handle voice transcript from WebSocket
+window.addEventListener('voice_transcript', function(e) {{
+    const text = e.detail.text;
+    console.log('🎤 Voice transcript received:', text);
+    
+    // Update Streamlit state via st.setComponentValue
+    const input = document.querySelector('[data-testid="stChatInput"] textarea');
+    if (input) {{
+        input.value = text;
+        input.dispatchEvent(new Event('input', {{ bubbles: true }}));
+        
+        // Auto-submit
+        setTimeout(() => {{
+            const button = document.querySelector('[data-testid="stChatInput"] button');
+            if (button) {{
+                button.click();
+            }}
+        }}, 500);
+    }}
+}});
+
+// Connect WebSocket when page loads
 connectWebSocket();
 </script>
 
 <div style="display:flex; flex-direction:column; align-items:center; gap:15px; padding:10px;">
     <div id="avatar" class="avatar">👩‍💼</div>
+    <div id="transcript-display" style="
+        background: #f5f5f5;
+        border-radius: 10px;
+        padding: 15px;
+        margin: 10px 0;
+        min-height: 50px;
+        width: 100%;
+        text-align: center;
+        border-left: 4px solid #4fc3f7;
+        font-size: 16px;
+    ">🎤 Click Start to speak</div>
     <button id="micBtn" onclick="toggleListening()" style="
         padding: 16px 48px;
         border-radius: 50px;
@@ -444,7 +547,7 @@ connectWebSocket();
 </div>
 """
 
-components.html(audio_html, height=250)
+components.html(audio_html, height=350)
 
 # ── Text Input ────────────────────────────────────────────────────────────────
 st.divider()
