@@ -157,12 +157,14 @@ async def proxy_websocket(websocket: WebSocket, path: str):
                 try:
                     while True:
                         message = await websocket.receive()
-                        if "text" in message:
+                        if message.get("type") == "websocket.disconnect":
+                            break
+                        if "text" in message and message["text"]:
                             await upstream.send(message["text"])
-                        elif "bytes" in message:
+                        elif "bytes" in message and message["bytes"]:
                             await upstream.send(message["bytes"])
-                except Exception:
-                    pass
+                except Exception as e:
+                    log.error(f"to_upstream error: {e}")
 
             async def to_client():
                 try:
@@ -171,8 +173,8 @@ async def proxy_websocket(websocket: WebSocket, path: str):
                             await websocket.send_bytes(msg)
                         else:
                             await websocket.send_text(msg)
-                except Exception:
-                    pass
+                except Exception as e:
+                    log.error(f"to_client error: {e}")
 
             await asyncio.gather(to_upstream(), to_client())
 
