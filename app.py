@@ -332,36 +332,56 @@ function connectWebSocket() {{
                 document.getElementById('status').textContent = '✅ ' + data.text;
                 document.getElementById('status').style.color = '#4caf50';
                 
-                // Update latest_transcript in session state via hidden input
-                const hiddenInputs = document.querySelectorAll('input[type="text"]');
-                for (let input of hiddenInputs) {{
-                    if (input.closest('[data-testid="stTextInput"]') || 
-                        input.placeholder === '' || 
-                        input.getAttribute('key') === 'latest_transcript') {{
-                        input.value = data.text;
-                        input.dispatchEvent(new Event('input', {{ bubbles: true }}));
-                        input.dispatchEvent(new Event('change', {{ bubbles: true }}));
-                        console.log('✅ Sent transcript to hidden input');
+                // FIND AND UPDATE THE HIDDEN VOICE INPUT
+                // Look for the text input with key="voice_query"
+                const inputs = document.querySelectorAll('input[type="text"]');
+                let voiceInput = null;
+                
+                for (let input of inputs) {{
+                    // Check by various attributes
+                    if (input.getAttribute('key') === 'voice_query' ||
+                        input.id === 'voice_query' ||
+                        input.getAttribute('data-testid') === 'stTextInput') {{
+                        voiceInput = input;
                         break;
                     }}
                 }}
                 
-                // Also try the chat input
-                const input = document.querySelector('[data-testid="stChatInput"] textarea');
-                if (input) {{
-                    input.value = data.text;
-                    input.dispatchEvent(new Event('input', {{ bubbles: true }}));
-                    setTimeout(() => {{
-                        const button = document.querySelector('[data-testid="stChatInput"] button');
-                        if (button) {{
-                            button.click();
-                            console.log('✅ Auto-submitted to chat');
-                        }} else {{
-                            console.log('⚠️ No send button found');
+                // If not found, try to find any hidden/visible text input
+                if (!voiceInput) {{
+                    for (let input of inputs) {{
+                        // Look for the one with "Voice Query" placeholder or key
+                        if (input.placeholder === '' && input.closest('.stTextInput')) {{
+                            voiceInput = input;
+                            break;
                         }}
-                    }}, 300);
+                    }}
+                }}
+                
+                if (voiceInput) {{
+                    // Set the value and trigger events
+                    voiceInput.value = data.text;
+                    voiceInput.dispatchEvent(new Event('input', {{ bubbles: true }}));
+                    voiceInput.dispatchEvent(new Event('change', {{ bubbles: true }}));
+                    console.log('✅ Sent transcript to voice input');
+                    
+                    // Also try to submit the form if it exists
+                    const form = voiceInput.closest('form');
+                    if (form) {{
+                        form.dispatchEvent(new Event('submit', {{ bubbles: true }}));
+                    }}
                 }} else {{
-                    console.log('⚠️ Chat input not found');
+                    console.log('⚠️ Voice input not found, trying chat input');
+                    // Fallback to chat input
+                    const chatInput = document.querySelector('[data-testid="stChatInput"] textarea');
+                    if (chatInput) {{
+                        chatInput.value = data.text;
+                        chatInput.dispatchEvent(new Event('input', {{ bubbles: true }}));
+                        setTimeout(() => {{
+                            const button = document.querySelector('[data-testid="stChatInput"] button');
+                            if (button) button.click();
+                        }}, 300);
+                    }}
                 }}
             }} else if (data.type === 'transcript' && !data.is_final && data.text) {{
                 document.getElementById('status').textContent = '💭 ' + data.text;
@@ -546,6 +566,41 @@ connectWebSocket();
 """
 
 st.components.v1.html(audio_html, height=200)
+
+# ── Hidden Voice Input Receiver ──────────────────────────────────────────────
+# This creates a hidden input that JavaScript can write to
+# The input is hidden using CSS
+st.markdown("""
+<style>
+    .hidden-voice-input {
+        display: none !important;
+    }
+</style>
+""", unsafe_allow_html=True)
+
+if "voice_query" not in st.session_state:
+    st.session_state.voice_query = ""
+
+# Hidden text input - JavaScript will write to this
+voice_query = st.text_input(
+    "Voice Query",
+    key="voice_query",
+    label_visibility="collapsed",
+    placeholder="",
+    value=st.session_state.voice_query
+)
+
+# Process the voice query if it's not empty and not already processed
+if voice_query and voice_query not in [msg["content"] for msg in st.session_state.messages if msg["role"] == "user"]:
+    # Clear the input immediately to prevent reprocessing
+    st.session_state.voice_query = ""
+    
+    # Process the query
+    st.session_state.messages.append({"role": "user", "content": voice_query})
+    with st.spinner("🤔 Thinking..."):
+        response = process_query(voice_query)
+        st.session_state.messages.append({"role": "assistant", "content": response})
+    st.rerun()
 
 # ── Voice Transcript Display & Send ──────────────────────────────────────────
 if "latest_transcript" not in st.session_state:
