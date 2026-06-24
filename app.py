@@ -237,7 +237,7 @@ st.markdown("""
         70% { box-shadow: 0 0 0 20px rgba(79, 195, 247, 0); }
         100% { box-shadow: 0 0 0 0 rgba(79, 195, 247, 0); }
     }
-    .interim {
+    .interim {{
         text-align: center;
         padding: 10px;
         color: #ff9800;
@@ -247,7 +247,7 @@ st.markdown("""
         background: rgba(255, 152, 0, 0.1);
         border-radius: 8px;
         margin: 10px 0;
-    }
+    }}
 </style>
 """, unsafe_allow_html=True)
 
@@ -329,16 +329,13 @@ function connectWebSocket() {{
             if (data.type === 'transcript' && data.is_final && data.text) {{
                 console.log('📝 Transcript:', data.text);
                 document.getElementById('status').textContent = '📝 ' + data.text;
-                // Auto submit to chat
                 const input = document.querySelector('[data-testid="stChatInput"] textarea');
                 if (input) {{
                     input.value = data.text;
                     input.dispatchEvent(new Event('input', {{ bubbles: true }}));
                     setTimeout(() => {{
                         const button = document.querySelector('[data-testid="stChatInput"] button');
-                        if (button) {{
-                            button.click();
-                        }}
+                        if (button) button.click();
                     }}, 100);
                 }}
             }}
@@ -388,12 +385,27 @@ async function startListening() {{
         processorNode.onaudioprocess = function(e) {{
             if (!isListening || !ws || ws.readyState !== WebSocket.OPEN) return;
             const inputData = e.inputBuffer.getChannelData(0);
+
+            // RMS silence check
+            let sum = 0;
+            for (let i = 0; i < inputData.length; i++) sum += inputData[i] * inputData[i];
+            const rms = Math.sqrt(sum / inputData.length);
+            if (rms < 0.001) return;
+
             const pcm = new Int16Array(inputData.length);
             for (let i = 0; i < inputData.length; i++) {{
                 let sample = Math.max(-1, Math.min(1, inputData[i]));
                 pcm[i] = Math.round(sample * 32767);
             }}
-            const base64 = btoa(String.fromCharCode(...new Uint8Array(pcm.buffer)));
+
+            // Chunk-safe base64 encoding
+            const bytes = new Uint8Array(pcm.buffer);
+            let binary = '';
+            const chunkSize = 8192;
+            for (let i = 0; i < bytes.length; i += chunkSize) {{
+                binary += String.fromCharCode(...bytes.subarray(i, i + chunkSize));
+            }}
+            const base64 = btoa(binary);
             ws.send(JSON.stringify({{type: 'audio', data: base64}}));
         }};
 
@@ -419,16 +431,13 @@ async function startListening() {{
 
 function stopListening() {{
     isListening = false;
-
     if (processorNode) {{ processorNode.disconnect(); processorNode = null; }}
     if (sourceNode) {{ sourceNode.disconnect(); sourceNode = null; }}
     if (mediaStream) {{ mediaStream.getTracks().forEach(t => t.stop()); mediaStream = null; }}
     if (audioContext && audioContext.state !== 'closed') {{ audioContext.close(); audioContext = null; }}
-
     if (ws && ws.readyState === WebSocket.OPEN) {{
         ws.send(JSON.stringify({{type: 'stop'}}));
     }}
-
     document.getElementById('micBtn').textContent = '🎙 Start';
     document.getElementById('micBtn').style.background = 'linear-gradient(135deg, #4fc3f7, #7c4dff)';
     document.getElementById('status').textContent = '⏹️ Stopped';
@@ -496,7 +505,7 @@ with st.expander("📚 Knowledge Base"):
 
 # ── Debug Info ────────────────────────────────────────────────────────────────
 with st.expander("ℹ️ Debug Info"):
-    st.json({
+    st.json({{
         "lang": st.session_state.lang,
         "lang_set": st.session_state.lang_set,
         "messages_count": len(st.session_state.messages),
@@ -505,4 +514,4 @@ with st.expander("ℹ️ Debug Info"):
         "groq_key": "✅" if GROQ_API_KEY else "❌",
         "deepgram_key": "✅" if DEEPGRAM_API_KEY else "❌",
         "ws_url": ws_url,
-    })
+    }})
