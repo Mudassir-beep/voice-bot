@@ -3,6 +3,7 @@ import base64
 import json
 import logging
 import os
+import socket
 import subprocess
 import sys
 import threading
@@ -21,10 +22,11 @@ PORT = int(os.environ.get("PORT", 8080))
 STREAMLIT_PORT = 8502
 STREAMLIT_URL = f"http://localhost:{STREAMLIT_PORT}"
 
-_streamlit_started = False
-_streamlit_lock = threading.Lock()
-
 # ── Start Streamlit in background thread ─────────────────────────────────────
+def is_port_in_use(port):
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        return s.connect_ex(('localhost', port)) == 0
+
 def run_streamlit():
     subprocess.run([
         sys.executable, "-m", "streamlit", "run", "app.py",
@@ -36,20 +38,20 @@ def run_streamlit():
         "--server.enableWebsocketCompression=false",
     ])
 
-with _streamlit_lock:
-    if not _streamlit_started:
-        _streamlit_started = True
-        threading.Thread(target=run_streamlit, daemon=True).start()
-        log.info("Waiting for Streamlit to start...")
-        for i in range(30):
-            try:
-                r = httpx.get(f"http://localhost:{STREAMLIT_PORT}/_stcore/health", timeout=2)
-                if r.status_code == 200:
-                    log.info("Streamlit is ready!")
-                    break
-            except Exception:
-                pass
-            time.sleep(1)
+if not is_port_in_use(STREAMLIT_PORT):
+    threading.Thread(target=run_streamlit, daemon=True).start()
+    log.info("Waiting for Streamlit to start...")
+    for i in range(30):
+        try:
+            r = httpx.get(f"http://localhost:{STREAMLIT_PORT}/_stcore/health", timeout=2)
+            if r.status_code == 200:
+                log.info("Streamlit is ready!")
+                break
+        except Exception:
+            pass
+        time.sleep(1)
+else:
+    log.info("Streamlit already running, skipping start.")
 
 app = FastAPI()
 
@@ -64,16 +66,10 @@ async def deepgram_stream(session_id: str, client_ws: WebSocket, audio_q: asynci
         "&utterance_end_ms=1000&vad_events=true&smart_format=true"
         "&encoding=linear16&sample_rate=16000&channels=1&endpointing=true"
     )
-    
-    # ✅ FIX: Use additional_headers instead of extra_headers
-    headers = [
-        ("Authorization", f"Token {DEEPGRAM_API_KEY}")
-    ]
-    
+    headers = [("Authorization", f"Token {DEEPGRAM_API_KEY}")]
     uri = f"wss://api.deepgram.com/v1/listen?{params}"
 
     try:
-        # ✅ FIX: Changed extra_headers to additional_headers
         async with ws_lib.connect(uri, additional_headers=headers) as dg_ws:
             log.info(f"[{session_id}] Deepgram connected")
 
@@ -155,7 +151,6 @@ async def audio_websocket(websocket: WebSocket):
 # ── /{path} — proxy Streamlit WebSockets ────────────────────────────────────
 @app.websocket("/{path:path}")
 async def proxy_websocket(websocket: WebSocket, path: str):
-    # Echo back Streamlit's required subprotocol
     subprotocols = websocket.headers.get("sec-websocket-protocol", "")
     subprotocol = subprotocols.split(",")[0].strip() if subprotocols else None
     await websocket.accept(subprotocol=subprotocol)
