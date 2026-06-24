@@ -13,7 +13,6 @@ import uvicorn
 import websockets as ws_lib
 from fastapi import FastAPI, Request, Response, WebSocket, WebSocketDisconnect
 
-
 log = logging.getLogger("server")
 logging.basicConfig(level=logging.INFO)
 
@@ -34,8 +33,16 @@ def run_streamlit():
     ])
 
 threading.Thread(target=run_streamlit, daemon=True).start()
-log.info(f"Streamlit starting on port {STREAMLIT_PORT}...")
-time.sleep(15)  # Give Streamlit time to boot
+log.info("Waiting for Streamlit to start...")
+for i in range(30):
+    try:
+        r = httpx.get(f"http://localhost:{STREAMLIT_PORT}/_stcore/health", timeout=2)
+        if r.status_code == 200:
+            log.info("Streamlit is ready!")
+            break
+    except Exception:
+        pass
+    time.sleep(1)
 
 app = FastAPI()
 
@@ -144,11 +151,18 @@ async def proxy_websocket(websocket: WebSocket, path: str):
         url += f"?{query}"
 
     try:
-        async with ws_lib.connect(url) as upstream:
+        async with ws_lib.connect(
+            url,
+            subprotocols=websocket.headers.get("sec-websocket-protocol", "").split(",") or None
+        ) as upstream:
             async def to_upstream():
                 try:
-                    async for msg in websocket.iter_bytes():
-                        await upstream.send(msg)
+                    while True:
+                        message = await websocket.receive()
+                        if "text" in message:
+                            await upstream.send(message["text"])
+                        elif "bytes" in message:
+                            await upstream.send(message["bytes"])
                 except Exception:
                     pass
 
@@ -196,4 +210,4 @@ async def proxy_http(request: Request, path: str):
 
 
 if __name__ == "__main__":
-   uvicorn.run("server:app", host="0.0.0.0", port=PORT)
+    uvicorn.run("server:app", host="0.0.0.0", port=PORT)
