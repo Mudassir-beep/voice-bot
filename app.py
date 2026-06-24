@@ -514,5 +514,3 @@ st.json({
     "deepgram_key": "✅" if DEEPGRAM_API_KEY else "❌",
     "ws_url": ws_url,
 })
-        "ws_url": ws_url,
-    }})
