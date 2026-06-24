@@ -58,8 +58,10 @@ app = FastAPI()
 # ── Deepgram streaming ───────────────────────────────────────────────────────
 async def deepgram_stream(session_id: str, client_ws: WebSocket, audio_q: asyncio.Queue):
     if not DEEPGRAM_API_KEY:
-        log.error("No Deepgram API key")
+        log.error(f"[{session_id}] ❌ No Deepgram API key")
         return
+
+    log.info(f"[{session_id}] 🔑 Connecting to Deepgram with API key: {DEEPGRAM_API_KEY[:10]}...")
 
     params = (
         "model=nova-2&punctuate=true&interim_results=true"
@@ -71,86 +73,137 @@ async def deepgram_stream(session_id: str, client_ws: WebSocket, audio_q: asynci
 
     try:
         async with ws_lib.connect(uri, additional_headers=headers) as dg_ws:
-            log.info(f"[{session_id}] Deepgram connected")
+            log.info(f"[{session_id}] ✅ Deepgram connected successfully!")
 
             async def sender():
+                chunk_count = 0
+                log.info(f"[{session_id}] 📤 Sender task started, waiting for audio...")
                 while True:
                     try:
-                        chunk = await asyncio.wait_for(audio_q.get(), timeout=5.0)
+                        # Get audio chunk from queue
+                        chunk = await asyncio.wait_for(audio_q.get(), timeout=3.0)
                         if chunk is None:
+                            log.info(f"[{session_id}] 📤 Received None (stop signal), closing sender")
                             break
+                        
+                        chunk_count += 1
+                        log.info(f"[{session_id}] 📤 Sending chunk #{chunk_count} ({len(chunk)} bytes) to Deepgram")
+                        
+                        # Send to Deepgram
                         await dg_ws.send(chunk)
+                        
                     except asyncio.TimeoutError:
+                        # Send keepalive to prevent timeout
                         try:
                             await dg_ws.send(json.dumps({"type": "KeepAlive"}))
-                        except Exception:
+                            if chunk_count % 10 == 0:
+                                log.info(f"[{session_id}] 💓 Sent keepalive")
+                        except Exception as e:
+                            log.error(f"[{session_id}] ❌ Keepalive error: {e}")
                             break
                     except Exception as e:
-                        log.error(f"[{session_id}] DG send error: {e}")
+                        log.error(f"[{session_id}] ❌ Sender error: {e}")
                         break
+                
+                log.info(f"[{session_id}] 📤 Sender finished. Total chunks: {chunk_count}")
 
             async def receiver():
-                async for msg in dg_ws:
-                    try:
-                        data = json.loads(msg)
-                        if data.get("type") == "Results":
-                            alts = data.get("channel", {}).get("alternatives", [{}])
-                            text = alts[0].get("transcript", "").strip() if alts else ""
-                            is_final = data.get("is_final", False)
-                            if text and is_final:
-                                log.info(f"[{session_id}] transcript: {text}")
-                                await client_ws.send_json({
-                                    "type": "transcript",
-                                    "text": text,
-                                    "is_final": True
-                                })
-                    except Exception as e:
-                        log.error(f"[{session_id}] DG recv error: {e}")
+                log.info(f"[{session_id}] 📨 Receiver task started")
+                try:
+                    async for msg in dg_ws:
+                        try:
+                            data = json.loads(msg)
+                            msg_type = data.get("type")
+                            log.info(f"[{session_id}] 📨 Received message type: {msg_type}")
+                            
+                            if msg_type == "Results":
+                                alts = data.get("channel", {}).get("alternatives", [{}])
+                                text = alts[0].get("transcript", "").strip() if alts else ""
+                                is_final = data.get("is_final", False)
+                                
+                                if text:
+                                    log.info(f"[{session_id}] 📝 Transcript: '{text}' (is_final: {is_final})")
+                                    
+                                    if is_final:
+                                        log.info(f"[{session_id}] ✅ FINAL transcript: {text}")
+                                        await client_ws.send_json({
+                                            "type": "transcript",
+                                            "text": text,
+                                            "is_final": True
+                                        })
+                            elif msg_type == "Error":
+                                log.error(f"[{session_id}] ❌ Deepgram Error: {data}")
+                            elif msg_type == "Metadata":
+                                log.info(f"[{session_id}] 📊 Metadata: {data}")
+                        except json.JSONDecodeError as e:
+                            log.error(f"[{session_id}] ❌ JSON decode error: {e}")
+                        except Exception as e:
+                            log.error(f"[{session_id}] ❌ Message processing error: {e}")
+                except Exception as e:
+                    log.error(f"[{session_id}] ❌ Receiver error: {e}")
+                
+                log.info(f"[{session_id}] 📨 Receiver finished")
 
+            # Run sender and receiver concurrently
             await asyncio.gather(sender(), receiver())
 
     except Exception as e:
-        log.error(f"[{session_id}] Deepgram error: {e}")
+        log.error(f"[{session_id}] ❌ Deepgram connection error: {type(e).__name__}: {e}")
 
 # ── /ws — audio WebSocket ────────────────────────────────────────────────────
+
 @app.websocket("/ws")
 async def audio_websocket(websocket: WebSocket):
     await websocket.accept()
     session_id = str(id(websocket))
     audio_q: asyncio.Queue = asyncio.Queue()
     dg_task = None
-    log.info(f"[{session_id}] Audio client connected")
+    log.info(f"[{session_id}] 🎤 Audio client connected")
 
     try:
         async for raw in websocket.iter_text():
-            data = json.loads(raw)
-            msg_type = data.get("type")
+            try:
+                data = json.loads(raw)
+                msg_type = data.get("type")
+                log.info(f"[{session_id}] 📩 Received message: {msg_type}")
+                
+                if msg_type == "start":
+                    log.info(f"[{session_id}] 🚀 Start received, creating Deepgram connection")
+                    audio_q = asyncio.Queue()
+                    dg_task = asyncio.create_task(
+                        deepgram_stream(session_id, websocket, audio_q)
+                    )
+                    log.info(f"[{session_id}] ✅ Deepgram task created")
 
-            if msg_type == "start":
-                audio_q = asyncio.Queue()
-                dg_task = asyncio.create_task(
-                    deepgram_stream(session_id, websocket, audio_q)
-                )
+                elif msg_type == "audio":
+                    audio_bytes = base64.b64decode(data.get("data", ""))
+                    log.info(f"[{session_id}] 🎵 Audio chunk received: {len(audio_bytes)} bytes")
+                    await audio_q.put(audio_bytes)
+                    log.info(f"[{session_id}] ✅ Audio chunk queued")
 
-            elif msg_type == "audio":
-                audio_bytes = base64.b64decode(data.get("data", ""))
-                await audio_q.put(audio_bytes)
+                elif msg_type == "stop":
+                    log.info(f"[{session_id}] 🛑 Stop received")
+                    await audio_q.put(None)
+                    if dg_task:
+                        try:
+                            await asyncio.wait_for(dg_task, timeout=3.0)
+                            log.info(f"[{session_id}] ✅ Deepgram task completed")
+                        except asyncio.TimeoutError:
+                            log.info(f"[{session_id}] ⏰ Deepgram task timeout, cancelling")
+                            dg_task.cancel()
 
-            elif msg_type == "stop":
-                await audio_q.put(None)
-                if dg_task:
-                    try:
-                        await asyncio.wait_for(dg_task, timeout=3.0)
-                    except asyncio.TimeoutError:
-                        dg_task.cancel()
+            except json.JSONDecodeError as e:
+                log.error(f"[{session_id}] ❌ JSON decode error: {e}")
+            except Exception as e:
+                log.error(f"[{session_id}] ❌ Message processing error: {e}")
 
     except WebSocketDisconnect:
-        log.info(f"[{session_id}] Audio client disconnected")
+        log.info(f"[{session_id}] 🔌 Audio client disconnected")
     except Exception as e:
-        log.error(f"[{session_id}] Audio WS error: {e}")
+        log.error(f"[{session_id}] ❌ Audio WS error: {type(e).__name__}: {e}")
     finally:
         await audio_q.put(None)
-
+        log.info(f"[{session_id}] 🧹 Cleanup complete")
 # ── /{path} — proxy Streamlit WebSockets ────────────────────────────────────
 @app.websocket("/{path:path}")
 async def proxy_websocket(websocket: WebSocket, path: str):
