@@ -306,7 +306,7 @@ elif render_domain:
 else:
     ws_url = f"ws://localhost:{PORT}/ws"
 
-# ── Audio Component (Fixed) ────────────────────────────────────────────────
+# ── Audio Component ────────────────────────────────────────────────────────────────
 audio_html = f"""
 <script>
 const WS_URL = '{ws_url}';
@@ -328,18 +328,40 @@ function connectWebSocket() {{
         try {{
             const data = JSON.parse(event.data);
             if (data.type === 'transcript' && data.is_final && data.text) {{
-                console.log('📝 Transcript:', data.text);
-                document.getElementById('status').textContent = '📝 ' + data.text;
-                document.getElementById('status').style.color = '#ff9800';
+                console.log('📝 Final transcript:', data.text);
+                document.getElementById('status').textContent = '✅ ' + data.text;
+                document.getElementById('status').style.color = '#4caf50';
+                
+                // Set the pending query in session state via the chat input
                 const input = document.querySelector('[data-testid="stChatInput"] textarea');
                 if (input) {{
                     input.value = data.text;
                     input.dispatchEvent(new Event('input', {{ bubbles: true }}));
                     setTimeout(() => {{
                         const button = document.querySelector('[data-testid="stChatInput"] button');
-                        if (button) button.click();
-                    }}, 100);
+                        if (button) {{
+                            button.click();
+                            console.log('✅ Auto-submitted to chat');
+                        }} else {{
+                            console.log('⚠️ No send button found, trying Enter key');
+                            input.dispatchEvent(new KeyboardEvent('keydown', {{
+                                key: 'Enter',
+                                code: 'Enter',
+                                keyCode: 13,
+                                which: 13,
+                                bubbles: true
+                            }}));
+                        }}
+                    }}, 300);
+                }} else {{
+                    console.log('⚠️ Chat input not found');
+                    // Show in status so user can copy-paste
+                    document.getElementById('status').textContent = '📝 Copy this: ' + data.text;
                 }}
+            }} else if (data.type === 'transcript' && !data.is_final && data.text) {{
+                // Show interim results
+                document.getElementById('status').textContent = '💭 ' + data.text;
+                document.getElementById('status').style.color = '#ff9800';
             }}
         }} catch(e) {{
             console.error('Message parse error:', e);
@@ -520,6 +542,27 @@ connectWebSocket();
 """
 
 st.components.v1.html(audio_html, height=200)
+
+# ── Auto-Process Voice Transcripts ────────────────────────────────────────────
+# This catches transcripts from the audio component and processes them
+if "pending_voice_query" not in st.session_state:
+    st.session_state.pending_voice_query = ""
+
+# Check if there's a pending voice query to process
+if st.session_state.pending_voice_query:
+    query = st.session_state.pending_voice_query
+    st.session_state.pending_voice_query = ""  # Clear it immediately
+    
+    # Add to messages as user
+    st.session_state.messages.append({"role": "user", "content": query})
+    
+    # Process with the bot
+    with st.spinner("🤔 Thinking..."):
+        response = process_query(query)
+        st.session_state.messages.append({"role": "assistant", "content": response})
+    
+    st.rerun()
+
 # ── Text Input ────────────────────────────────────────────────────────────────
 st.divider()
 if prompt := st.chat_input("Or type your question here..."):
