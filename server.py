@@ -209,4 +209,4 @@ async def proxy_http(request: Request, path: str):
 
 if __name__ == "__main__":
     uvicorn.run("server:app", host="0.0.0.0", port=PORT)
-    uvicorn.run("server:app", host="0.0.0.0", port=PORT)
+
