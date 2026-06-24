@@ -151,13 +151,17 @@ async def audio_websocket(websocket: WebSocket):
 # ── /{path} — proxy Streamlit WebSockets ────────────────────────────────────
 @app.websocket("/{path:path}")
 async def proxy_websocket(websocket: WebSocket, path: str):
-    await websocket.accept()
+    # Echo back Streamlit's required subprotocol
+    subprotocols = websocket.headers.get("sec-websocket-protocol", "")
+    subprotocol = subprotocols.split(",")[0].strip() if subprotocols else None
+    await websocket.accept(subprotocol=subprotocol)
+
     query = websocket.url.query
     url = f"ws://localhost:{STREAMLIT_PORT}/{path}"
     if query:
         url += f"?{query}"
 
-    log.info(f"WS proxy: {path} -> {url}")
+    log.info(f"WS proxy: {path} -> {url} subprotocol={subprotocol}")
 
     try:
         async with ws_lib.connect(url) as upstream:
