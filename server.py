@@ -76,44 +76,27 @@ async def deepgram_stream(session_id: str, client_ws: WebSocket, audio_q: asynci
             log.info(f"[{session_id}] ✅ Deepgram connected successfully!")
 
             async def sender():
-    chunk_count = 0
-    log.info(f"[{session_id}] 📤 Sender task started, waiting for audio...")
-    while True:
-        try:
-            # Get audio chunk from queue
-            chunk = await asyncio.wait_for(audio_q.get(), timeout=3.0)
-            if chunk is None:
-                log.info(f"[{session_id}] 📤 Received None (stop signal), closing sender")
-                break
-            
-            chunk_count += 1
-            
-            # IMPORTANT: Send as BINARY frame, not text
-            # The chunk is already bytes from base64 decoding
-            await dg_ws.send(chunk)  # This sends as binary
-            
-            if chunk_count % 10 == 0:
-                log.info(f"[{session_id}] 📤 Sent chunk #{chunk_count} ({len(chunk)} bytes) to Deepgram (BINARY)")
-                
-        except asyncio.TimeoutError:
-            # Send keepalive as TEXT frame (JSON)
-            try:
-                await dg_ws.send(json.dumps({"type": "KeepAlive"}))
-                if chunk_count % 10 == 0:
-                    log.info(f"[{session_id}] 💓 Sent keepalive")
-            except Exception as e:
-                log.error(f"[{session_id}] ❌ Keepalive error: {e}")
-                break
-        except Exception as e:
-            log.error(f"[{session_id}] ❌ Sender error: {e}")
-            break
-    
-    log.info(f"[{session_id}] 📤 Sender finished. Total chunks: {chunk_count}")                        
-                        # Send to Deepgram
-                        await dg_ws.send(chunk)
+                chunk_count = 0
+                log.info(f"[{session_id}] 📤 Sender task started, waiting for audio...")
+                while True:
+                    try:
+                        # Get audio chunk from queue
+                        chunk = await asyncio.wait_for(audio_q.get(), timeout=3.0)
+                        if chunk is None:
+                            log.info(f"[{session_id}] 📤 Received None (stop signal), closing sender")
+                            break
                         
+                        chunk_count += 1
+                        
+                        # IMPORTANT: Send as BINARY frame, not text
+                        # The chunk is already bytes from base64 decoding
+                        await dg_ws.send(chunk)  # This sends as binary
+                        
+                        if chunk_count % 10 == 0:
+                            log.info(f"[{session_id}] 📤 Sent chunk #{chunk_count} ({len(chunk)} bytes) to Deepgram (BINARY)")
+                            
                     except asyncio.TimeoutError:
-                        # Send keepalive to prevent timeout
+                        # Send keepalive as TEXT frame (JSON)
                         try:
                             await dg_ws.send(json.dumps({"type": "KeepAlive"}))
                             if chunk_count % 10 == 0:
@@ -171,7 +154,6 @@ async def deepgram_stream(session_id: str, client_ws: WebSocket, audio_q: asynci
         log.error(f"[{session_id}] ❌ Deepgram connection error: {type(e).__name__}: {e}")
 
 # ── /ws — audio WebSocket ────────────────────────────────────────────────────
-
 @app.websocket("/ws")
 async def audio_websocket(websocket: WebSocket):
     await websocket.accept()
