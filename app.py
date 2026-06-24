@@ -504,14 +504,15 @@ with st.expander("📚 Knowledge Base"):
                 st.error(f"Error building index: {e}")
 
 # ── Debug Info ────────────────────────────────────────────────────────────────
-with st.expander("ℹ️ Debug Info"):
-    st.json({{
-        "lang": st.session_state.lang,
-        "lang_set": st.session_state.lang_set,
-        "messages_count": len(st.session_state.messages),
-        "is_listening": st.session_state.is_listening,
-        "db_exists": str(DB_PATH.exists()),
-        "groq_key": "✅" if GROQ_API_KEY else "❌",
-        "deepgram_key": "✅" if DEEPGRAM_API_KEY else "❌",
+st.json({
+    "lang": st.session_state.lang,
+    "lang_set": st.session_state.lang_set,
+    "messages_count": len(st.session_state.messages),
+    "is_listening": st.session_state.is_listening,
+    "db_exists": str(DB_PATH.exists()),
+    "groq_key": "✅" if GROQ_API_KEY else "❌",
+    "deepgram_key": "✅" if DEEPGRAM_API_KEY else "❌",
+    "ws_url": ws_url,
+})
         "ws_url": ws_url,
     }})
