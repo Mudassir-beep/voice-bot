@@ -18,7 +18,7 @@ logging.basicConfig(level=logging.INFO)
 
 DEEPGRAM_API_KEY = os.environ.get("DEEPGRAM_API_KEY", "")
 PORT = int(os.environ.get("PORT", 8080))
-STREAMLIT_PORT = 8501
+STREAMLIT_PORT = 8502
 STREAMLIT_URL = f"http://localhost:{STREAMLIT_PORT}"
 
 # ── Start Streamlit in background thread ─────────────────────────────────────
@@ -30,6 +30,7 @@ def run_streamlit():
         "--server.headless=true",
         "--server.enableCORS=false",
         "--server.enableXsrfProtection=false",
+        "--server.enableWebsocketCompression=false",
     ])
 
 threading.Thread(target=run_streamlit, daemon=True).start()
