@@ -222,7 +222,7 @@ st.markdown("""
         box-shadow: 0 0 30px rgba(79, 195, 247, 0.5);
     }
     .avatar.speaking {
-        animation: pulse-ring 0.5s infinite;
+        animation: pulse-speak 0.5s infinite;
         box-shadow: 0 0 30px rgba(124, 77, 255, 0.6);
         background: linear-gradient(135deg, #7c4dff, #e91e63);
     }
@@ -230,6 +230,11 @@ st.markdown("""
         0% { box-shadow: 0 0 0 0 rgba(79, 195, 247, 0.4); }
         70% { box-shadow: 0 0 0 20px rgba(79, 195, 247, 0); }
         100% { box-shadow: 0 0 0 0 rgba(79, 195, 247, 0); }
+    }
+    @keyframes pulse-speak {
+        0% { box-shadow: 0 0 0 0 rgba(124, 77, 255, 0.6); }
+        70% { box-shadow: 0 0 0 20px rgba(124, 77, 255, 0); }
+        100% { box-shadow: 0 0 0 0 rgba(124, 77, 255, 0); }
     }
 </style>
 """, unsafe_allow_html=True)
@@ -283,6 +288,7 @@ audio_html = f"""
 const WS_URL = '{ws_url}';
 let ws = null;
 let isListening = false;
+let isSpeaking = false;
 let audioContext = null;
 let mediaStream = null;
 let source = null;
@@ -292,7 +298,6 @@ let currentLang = '{st.session_state.lang}';
 function connectWebSocket() {{
     ws = new WebSocket(WS_URL);
     ws.onopen = function() {{
-        console.log('✅ WebSocket connected');
         setStatus('🟢 Connected - click Start', '#4caf50');
     }};
     ws.onmessage = function(event) {{
@@ -304,21 +309,16 @@ function connectWebSocket() {{
             }}
 
             if (data.type === 'transcript' && data.is_final && data.text) {{
-                setStatus('📝 ' + data.text, '#2196f3');
+                setStatus('📝 You: ' + data.text, '#2196f3');
             }}
 
             if (data.type === 'response') {{
                 setStatus('🤖 ' + data.text, '#9c27b0');
-                // Add to chat via postMessage
-                window.parent.postMessage({{
-                    type: 'reem_response',
-                    user_text: '',
-                    bot_text: data.text
-                }}, '*');
             }}
 
             if (data.type === 'audio_response') {{
                 setStatus('🔊 Speaking...', '#7c4dff');
+                setAvatar('speaking');
                 playAudio(data.audio);
             }}
 
@@ -330,13 +330,26 @@ function connectWebSocket() {{
         setStatus('🔄 Reconnecting...', '#ff9800');
         setTimeout(connectWebSocket, 2000);
     }};
-    ws.onerror = function(error) {{
+    ws.onerror = function() {{
         setStatus('❌ Connection error', '#f44336');
     }};
 }}
 
+function setStatus(text, color) {{
+    const el = document.getElementById('status');
+    if (el) {{ el.textContent = text; el.style.color = color || '#888'; }}
+}}
+
+function setAvatar(state) {{
+    const el = document.getElementById('avatar');
+    if (el) {{
+        el.className = 'avatar' + (state ? ' ' + state : '');
+    }}
+}}
+
 function playAudio(base64Audio) {{
     try {{
+        isSpeaking = true;
         const binary = atob(base64Audio);
         const bytes = new Uint8Array(binary.length);
         for (let i = 0; i < binary.length; i++) {{
@@ -347,19 +360,21 @@ function playAudio(base64Audio) {{
         const audio = new Audio(url);
         audio.onended = function() {{
             URL.revokeObjectURL(url);
+            isSpeaking = false;
             if (isListening) {{
+                setAvatar('listening');
                 setStatus('🎤 Listening... Speak now', '#4caf50');
             }}
+        }};
+        audio.onerror = function() {{
+            isSpeaking = false;
+            if (isListening) setAvatar('listening');
         }};
         audio.play();
     }} catch(e) {{
         console.error('Audio play error:', e);
+        isSpeaking = false;
     }}
-}}
-
-function setStatus(text, color) {{
-    const el = document.getElementById('status');
-    if (el) {{ el.textContent = text; el.style.color = color || '#888'; }}
 }}
 
 async function toggleListening() {{
@@ -391,8 +406,9 @@ async function startListening() {{
 
         processor.onaudioprocess = function(e) {{
             if (!isListening || !ws || ws.readyState !== WebSocket.OPEN) return;
-            const inputData = e.inputBuffer.getChannelData(0);
+            if (isSpeaking) return;
 
+            const inputData = e.inputBuffer.getChannelData(0);
             let sum = 0;
             for (let i = 0; i < inputData.length; i++) sum += inputData[i] * inputData[i];
             const rms = Math.sqrt(sum / inputData.length);
@@ -402,7 +418,6 @@ async function startListening() {{
             for (let i = 0; i < inputData.length; i++) {{
                 pcm[i] = Math.round(Math.max(-1, Math.min(1, inputData[i])) * 32767);
             }}
-
             const bytes = new Uint8Array(pcm.buffer);
             let binary = '';
             for (let i = 0; i < bytes.length; i += 4096) {{
@@ -421,6 +436,7 @@ async function startListening() {{
         isListening = true;
         document.getElementById('micBtn').textContent = '⏹️ Stop';
         document.getElementById('micBtn').style.background = 'linear-gradient(135deg, #f44336, #e91e63)';
+        setAvatar('listening');
         setStatus('🎤 Listening... Speak now', '#4caf50');
 
     }} catch(err) {{
@@ -431,6 +447,7 @@ async function startListening() {{
 
 function stopListening() {{
     isListening = false;
+    isSpeaking = false;
     if (processor) {{ processor.disconnect(); processor = null; }}
     if (source) {{ source.disconnect(); source = null; }}
     if (mediaStream) {{ mediaStream.getTracks().forEach(t => t.stop()); mediaStream = null; }}
@@ -440,6 +457,7 @@ function stopListening() {{
     }}
     document.getElementById('micBtn').textContent = '🎙 Start';
     document.getElementById('micBtn').style.background = 'linear-gradient(135deg, #4fc3f7, #7c4dff)';
+    setAvatar('');
     setStatus('⏹️ Stopped', '#888');
 }}
 
@@ -447,6 +465,7 @@ connectWebSocket();
 </script>
 
 <div style="display:flex; flex-direction:column; align-items:center; gap:15px; padding:10px;">
+    <div id="avatar" class="avatar">👩‍💼</div>
     <button id="micBtn" onclick="toggleListening()" style="
         padding: 16px 48px;
         border-radius: 50px;
@@ -460,11 +479,11 @@ connectWebSocket();
         box-shadow: 0 4px 15px rgba(79, 195, 247, 0.3);
         width: 200px;
     ">🎙 Start</button>
-    <div id="status" style="color:#888; font-size:14px; min-height:24px; text-align:center;">🔄 Connecting...</div>
+    <div id="status" style="color:#888; font-size:14px; min-height:24px; text-align:center; max-width:300px; word-wrap:break-word;">🔄 Connecting...</div>
 </div>
 """
 
-components.html(audio_html, height=150)
+components.html(audio_html, height=280)
 
 st.divider()
 if prompt := st.chat_input("Or type your question here..."):
@@ -497,7 +516,7 @@ with st.expander("📚 Knowledge Base"):
                 st.error(f"Error building index: {e}")
 
 with st.expander("ℹ️ Debug Info"):
-    st.json({
+    st.json({{
         "lang": st.session_state.lang,
         "lang_set": st.session_state.lang_set,
         "messages_count": len(st.session_state.messages),
@@ -505,4 +524,4 @@ with st.expander("ℹ️ Debug Info"):
         "groq_key": "✅" if GROQ_API_KEY else "❌",
         "deepgram_key": "✅" if DEEPGRAM_API_KEY else "❌",
         "ws_url": ws_url,
-    })
+    }})
