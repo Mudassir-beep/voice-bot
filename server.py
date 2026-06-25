@@ -7,12 +7,7 @@ import socket
 import subprocess
 import sys
 import tempfile
-import threadingif msg_type == "start":
-    session_state["lang"] = data.get("lang", "en")
-    audio_q = asyncio.Queue()
-    dg_task = asyncio.create_task(
-        deepgram_stream(session_id, websocket, audio_q, session_state)
-    )
+import threading
 import time
 from pathlib import Path
 from typing import Optional
@@ -236,25 +231,20 @@ async def audio_websocket(websocket: WebSocket):
             data = json.loads(raw)
             msg_type = data.get("type")
 
-          if msg_type == "start":
-
-    session_state["lang"] = data.get("lang", "en")
-
-    if dg_task and not dg_task.done():
-        dg_task.cancel()
-
-    audio_q = asyncio.Queue()
-
-    dg_task = asyncio.create_task(
-        deepgram_stream(
-            session_id,
-            websocket,
-            audio_q,
-            session_state
-        )
-    )
-
-    log.info(f"[{session_id}] START RECEIVED")
+            if msg_type == "start":
+                session_state["lang"] = data.get("lang", "en")
+                if dg_task and not dg_task.done():
+                    dg_task.cancel()
+                audio_q = asyncio.Queue()
+                dg_task = asyncio.create_task(
+                    deepgram_stream(
+                        session_id,
+                        websocket,
+                        audio_q,
+                        session_state
+                    )
+                )
+                log.info(f"[{session_id}] START RECEIVED")
 
             elif msg_type == "audio":
                 audio_bytes = base64.b64decode(data.get("data", ""))
