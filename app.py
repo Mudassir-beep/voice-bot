@@ -397,6 +397,7 @@ async function toggleListening() {{
 }}
 
 async function startListening() {{
+    if (isListening) return;
     try {{
         setStatus('🎤 Requesting mic...', '#ff9800');
         mediaStream = await navigator.mediaDevices.getUserMedia({{
