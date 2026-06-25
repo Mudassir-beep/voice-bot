@@ -15,7 +15,6 @@ import streamlit.components.v1 as components
 logging.basicConfig(level=logging.INFO)
 log = logging.getLogger("reem")
 
-# ── Config ───────────────────────────────────────────────────────────────────
 GROQ_API_KEY = os.environ.get("GROQ_API_KEY", "")
 DEEPGRAM_API_KEY = os.environ.get("DEEPGRAM_API_KEY", "")
 PORT = int(os.environ.get("PORT", 8080))
@@ -37,7 +36,6 @@ status TEXT (Delivered / In Transit / Pending)
 delivery_date TEXT
 comments TEXT"""
 
-# ── ML State ─────────────────────────────────────────────────────────────────
 _embedder: Optional[SentenceTransformer] = None
 _faiss_index = None
 _chunks: Optional[np.ndarray] = None
@@ -74,10 +72,8 @@ def build_index(texts: list[str]):
     log.info(f"Index built: {len(raw_chunks)} chunks")
 
 try_load_index()
-
 groq_client = Groq(api_key=GROQ_API_KEY) if GROQ_API_KEY else None
 
-# ── Lang config ───────────────────────────────────────────────────────────────
 LANG_KEYWORDS = {
     "en": ["english", "inglés"],
     "ar": ["arabic", "عربي", "عربية", "العربية"],
@@ -91,7 +87,6 @@ NOT_FOUND = {
     "ar": "لم أجد طلباً بهذا الرقم. يرجى التحقق والمحاولة مرة أخرى.",
 }
 
-# ── Helpers ───────────────────────────────────────────────────────────────────
 def route(query: str) -> str:
     if not groq_client:
         return "rag"
@@ -149,15 +144,12 @@ def detect_lang(text: str):
 def process_query(query: str) -> str:
     if not query.strip():
         return "Please ask a question."
-
     if not st.session_state.lang_set:
         lang = detect_lang(query)
         if lang:
             st.session_state.lang = lang
             st.session_state.lang_set = True
-
     intent = route(query)
-
     if intent == "sql":
         match = re.search(r"\b\d{3,}\b", query)
         if not match:
@@ -165,7 +157,6 @@ def process_query(query: str) -> str:
         sql = generate_sql(query)
         result, err = run_sql(sql)
         if err or not result or not result[1]:
-            log.error(f"SQL error: {err}")
             return NOT_FOUND[st.session_state.lang]
         cols, rows = result
         try:
@@ -209,58 +200,47 @@ if "lang" not in st.session_state:
     st.session_state.lang = "en"
 if "lang_set" not in st.session_state:
     st.session_state.lang_set = False
-if "interim_text" not in st.session_state:
-    st.session_state.interim_text = ""
 if "is_listening" not in st.session_state:
     st.session_state.is_listening = False
 
-# ── CSS ───────────────────────────────────────────────────────────────────────
 st.markdown("""
 <style>
     .avatar {
-        width: 100px;
-        height: 100px;
+        width: 120px;
+        height: 120px;
         border-radius: 50%;
         margin: 0 auto 10px auto;
         display: flex;
         align-items: center;
         justify-content: center;
         background: linear-gradient(135deg, #4fc3f7, #7c4dff);
-        font-size: 48px;
+        font-size: 56px;
+        transition: all 0.3s;
     }
     .avatar.listening {
         animation: pulse-ring 1s infinite;
         box-shadow: 0 0 30px rgba(79, 195, 247, 0.5);
+    }
+    .avatar.speaking {
+        animation: pulse-ring 0.5s infinite;
+        box-shadow: 0 0 30px rgba(124, 77, 255, 0.6);
+        background: linear-gradient(135deg, #7c4dff, #e91e63);
     }
     @keyframes pulse-ring {
         0% { box-shadow: 0 0 0 0 rgba(79, 195, 247, 0.4); }
         70% { box-shadow: 0 0 0 20px rgba(79, 195, 247, 0); }
         100% { box-shadow: 0 0 0 0 rgba(79, 195, 247, 0); }
     }
-    .interim {{
-        text-align: center;
-        padding: 10px;
-        color: #ff9800;
-        font-size: 16px;
-        font-style: italic;
-        min-height: 40px;
-        background: rgba(255, 152, 0, 0.1);
-        border-radius: 8px;
-        margin: 10px 0;
-    }}
 </style>
 """, unsafe_allow_html=True)
 
-# ── Header ────────────────────────────────────────────────────────────────────
 col1, col2, col3 = st.columns([1, 1, 1])
 with col2:
-    avatar_class = "avatar listening" if st.session_state.is_listening else "avatar"
-    st.markdown(f'<div class="{avatar_class}">👩‍💼</div>', unsafe_allow_html=True)
+    st.markdown('<div class="avatar" id="main-avatar">👩‍💼</div>', unsafe_allow_html=True)
     st.title("Reem")
     st.caption("Bin Dawood Holdings - Voice Agent")
 st.divider()
 
-# ── Language Selection ────────────────────────────────────────────────────────
 lang_col1, lang_col2 = st.columns(2)
 with lang_col1:
     if st.button("🇬🇧 English", use_container_width=True,
@@ -275,7 +255,6 @@ with lang_col2:
         st.session_state.lang_set = True
         st.rerun()
 
-# ── Check Database ────────────────────────────────────────────────────────────
 if not DB_PATH.exists():
     st.warning("⚠️ Database file 'saudi_orders_database.db' not found.")
     uploaded_db = st.file_uploader("Upload saudi_orders_database.db", type=["db"])
@@ -286,19 +265,12 @@ if not DB_PATH.exists():
         st.rerun()
     st.stop()
 
-# ── Interim Transcript ────────────────────────────────────────────────────────
-if st.session_state.interim_text:
-    st.markdown(f'<div class="interim">💬 {st.session_state.interim_text}</div>', unsafe_allow_html=True)
-
-# ── Chat Display ──────────────────────────────────────────────────────────────
 for msg in st.session_state.messages:
     with st.chat_message(msg["role"]):
         st.write(msg["content"])
 
-# ── WebSocket URL ─────────────────────────────────────────────────────────────
 railway_domain = os.environ.get("RAILWAY_PUBLIC_DOMAIN", "")
 render_domain = os.environ.get("RENDER_EXTERNAL_URL", "")
-
 if railway_domain:
     ws_url = f"wss://{railway_domain}/ws"
 elif render_domain:
@@ -306,7 +278,6 @@ elif render_domain:
 else:
     ws_url = f"ws://localhost:{PORT}/ws"
 
-# ── Audio Component ────────────────────────────────────────────────────────────────
 audio_html = f"""
 <script>
 const WS_URL = '{ws_url}';
@@ -316,92 +287,79 @@ let audioContext = null;
 let mediaStream = null;
 let source = null;
 let processor = null;
+let currentLang = '{st.session_state.lang}';
 
 function connectWebSocket() {{
     ws = new WebSocket(WS_URL);
     ws.onopen = function() {{
         console.log('✅ WebSocket connected');
-        document.getElementById('status').textContent = '🟢 Connected - click Start';
-        document.getElementById('status').style.color = '#4caf50';
+        setStatus('🟢 Connected - click Start', '#4caf50');
     }};
     ws.onmessage = function(event) {{
         try {{
             const data = JSON.parse(event.data);
-            if (data.type === 'transcript' && data.is_final && data.text) {{
-                console.log('📝 Final transcript:', data.text);
-                document.getElementById('status').textContent = '✅ ' + data.text;
-                document.getElementById('status').style.color = '#4caf50';
-                
-                // FIND AND UPDATE THE HIDDEN VOICE INPUT
-                // Look for the text input with key="voice_query"
-                const inputs = document.querySelectorAll('input[type="text"]');
-                let voiceInput = null;
-                
-                for (let input of inputs) {{
-                    // Check by various attributes
-                    if (input.getAttribute('key') === 'voice_query' ||
-                        input.id === 'voice_query' ||
-                        input.getAttribute('data-testid') === 'stTextInput') {{
-                        voiceInput = input;
-                        break;
-                    }}
-                }}
-                
-                // If not found, try to find any hidden/visible text input
-                if (!voiceInput) {{
-                    for (let input of inputs) {{
-                        // Look for the one with "Voice Query" placeholder or key
-                        if (input.placeholder === '' && input.closest('.stTextInput')) {{
-                            voiceInput = input;
-                            break;
-                        }}
-                    }}
-                }}
-                
-                if (voiceInput) {{
-                    // Set the value and trigger events
-                    voiceInput.value = data.text;
-                    voiceInput.dispatchEvent(new Event('input', {{ bubbles: true }}));
-                    voiceInput.dispatchEvent(new Event('change', {{ bubbles: true }}));
-                    console.log('✅ Sent transcript to voice input');
-                    
-                    // Also try to submit the form if it exists
-                    const form = voiceInput.closest('form');
-                    if (form) {{
-                        form.dispatchEvent(new Event('submit', {{ bubbles: true }}));
-                    }}
-                }} else {{
-                    console.log('⚠️ Voice input not found, trying chat input');
-                    // Fallback to chat input
-                    const chatInput = document.querySelector('[data-testid="stChatInput"] textarea');
-                    if (chatInput) {{
-                        chatInput.value = data.text;
-                        chatInput.dispatchEvent(new Event('input', {{ bubbles: true }}));
-                        setTimeout(() => {{
-                            const button = document.querySelector('[data-testid="stChatInput"] button');
-                            if (button) button.click();
-                        }}, 300);
-                    }}
-                }}
-            }} else if (data.type === 'transcript' && !data.is_final && data.text) {{
-                document.getElementById('status').textContent = '💭 ' + data.text;
-                document.getElementById('status').style.color = '#ff9800';
+
+            if (data.type === 'transcript' && !data.is_final && data.text) {{
+                setStatus('💭 ' + data.text, '#ff9800');
             }}
+
+            if (data.type === 'transcript' && data.is_final && data.text) {{
+                setStatus('📝 ' + data.text, '#2196f3');
+            }}
+
+            if (data.type === 'response') {{
+                setStatus('🤖 ' + data.text, '#9c27b0');
+                // Add to chat via postMessage
+                window.parent.postMessage({{
+                    type: 'reem_response',
+                    user_text: '',
+                    bot_text: data.text
+                }}, '*');
+            }}
+
+            if (data.type === 'audio_response') {{
+                setStatus('🔊 Speaking...', '#7c4dff');
+                playAudio(data.audio);
+            }}
+
         }} catch(e) {{
             console.error('Message parse error:', e);
         }}
     }};
     ws.onclose = function() {{
-        console.log('❌ WebSocket disconnected');
-        document.getElementById('status').textContent = '🔄 Reconnecting...';
-        document.getElementById('status').style.color = '#ff9800';
+        setStatus('🔄 Reconnecting...', '#ff9800');
         setTimeout(connectWebSocket, 2000);
     }};
     ws.onerror = function(error) {{
-        console.error('WebSocket error:', error);
-        document.getElementById('status').textContent = '❌ Connection error';
-        document.getElementById('status').style.color = '#f44336';
+        setStatus('❌ Connection error', '#f44336');
     }};
+}}
+
+function playAudio(base64Audio) {{
+    try {{
+        const binary = atob(base64Audio);
+        const bytes = new Uint8Array(binary.length);
+        for (let i = 0; i < binary.length; i++) {{
+            bytes[i] = binary.charCodeAt(i);
+        }}
+        const blob = new Blob([bytes], {{ type: 'audio/mp3' }});
+        const url = URL.createObjectURL(blob);
+        const audio = new Audio(url);
+        audio.onended = function() {{
+            URL.revokeObjectURL(url);
+            if (isListening) {{
+                setStatus('🎤 Listening... Speak now', '#4caf50');
+            }}
+        }};
+        audio.play();
+    }} catch(e) {{
+        console.error('Audio play error:', e);
+    }}
+}}
+
+function setStatus(text, color) {{
+    const el = document.getElementById('status');
+    if (el) {{ el.textContent = text; el.style.color = color || '#888'; }}
 }}
 
 async function toggleListening() {{
@@ -414,134 +372,75 @@ async function toggleListening() {{
 
 async function startListening() {{
     try {{
-        console.log('🎤 Requesting microphone...');
-        document.getElementById('status').textContent = '🎤 Requesting mic...';
-        
+        setStatus('🎤 Requesting mic...', '#ff9800');
         mediaStream = await navigator.mediaDevices.getUserMedia({{
             audio: {{
                 sampleRate: 16000,
                 channelCount: 1,
-                echoCancellation: false,
-                noiseSuppression: false,
-                autoGainControl: false
+                echoCancellation: true,
+                noiseSuppression: true,
+                autoGainControl: true
             }}
         }});
-        console.log('✅ Microphone granted');
 
-        // FORCE 16kHz sample rate
-        audioContext = new (window.AudioContext || window.webkitAudioContext)({{
-            sampleRate: 16000
-        }});
+        audioContext = new (window.AudioContext || window.webkitAudioContext)({{ sampleRate: 16000 }});
         await audioContext.resume();
-        console.log('✅ Audio context resumed, sample rate:', audioContext.sampleRate);
 
         source = audioContext.createMediaStreamSource(mediaStream);
         processor = audioContext.createScriptProcessor(2048, 1, 1);
 
-        let lastSendTime = 0;
-
         processor.onaudioprocess = function(e) {{
             if (!isListening || !ws || ws.readyState !== WebSocket.OPEN) return;
-            
             const inputData = e.inputBuffer.getChannelData(0);
-            
-            // Calculate RMS
+
             let sum = 0;
-            for (let i = 0; i < inputData.length; i++) {{
-                sum += inputData[i] * inputData[i];
-            }}
+            for (let i = 0; i < inputData.length; i++) sum += inputData[i] * inputData[i];
             const rms = Math.sqrt(sum / inputData.length);
-            
-            // Log audio level periodically
-            const now = Date.now();
-            if (now - lastSendTime > 1000 && rms > 0.001) {{
-                console.log('🎤 Audio level:', rms.toFixed(4));
-                lastSendTime = now;
-                document.getElementById('status').textContent = '🎤 Speaking... (level: ' + rms.toFixed(4) + ')';
-            }}
-            
-            // Only send if there's actual audio
-            if (rms < 0.001) return;
-            
-            // Convert to PCM16
+            if (rms < 0.0001) return;
+
             const pcm = new Int16Array(inputData.length);
             for (let i = 0; i < inputData.length; i++) {{
-                let sample = Math.max(-1, Math.min(1, inputData[i]));
-                pcm[i] = Math.round(sample * 32767);
+                pcm[i] = Math.round(Math.max(-1, Math.min(1, inputData[i])) * 32767);
             }}
-            
-            // Convert to base64
+
             const bytes = new Uint8Array(pcm.buffer);
             let binary = '';
-            const chunkSize = 4096;
-            for (let i = 0; i < bytes.length; i += chunkSize) {{
-                const chunk = bytes.subarray(i, Math.min(i + chunkSize, bytes.length));
-                binary += String.fromCharCode(...chunk);
+            for (let i = 0; i < bytes.length; i += 4096) {{
+                binary += String.fromCharCode(...bytes.subarray(i, i + 4096));
             }}
-            const base64 = btoa(binary);
-            
-            // Send audio
-            try {{
-                ws.send(JSON.stringify({{type: 'audio', data: base64}}));
-                console.log('📤 Sent audio chunk');
-            }} catch(err) {{
-                console.error('Send error:', err);
-            }}
+            ws.send(JSON.stringify({{ type: 'audio', data: btoa(binary) }}));
         }};
 
         source.connect(processor);
         processor.connect(audioContext.destination);
 
-        // Send start command
         if (ws && ws.readyState === WebSocket.OPEN) {{
-            ws.send(JSON.stringify({{type: 'start'}}));
-            console.log('📤 Sent start command');
+            ws.send(JSON.stringify({{ type: 'start', lang: currentLang }}));
         }}
 
         isListening = true;
         document.getElementById('micBtn').textContent = '⏹️ Stop';
         document.getElementById('micBtn').style.background = 'linear-gradient(135deg, #f44336, #e91e63)';
-        document.getElementById('status').textContent = '🎤 Listening... Speak now';
-        document.getElementById('status').style.color = '#4caf50';
+        setStatus('🎤 Listening... Speak now', '#4caf50');
 
     }} catch(err) {{
-        console.error('❌ Microphone error:', err);
-        document.getElementById('status').textContent = '❌ Error: ' + err.message;
-        document.getElementById('status').style.color = '#f44336';
-        alert('Microphone error: ' + err.message + '\\n\\nPlease allow microphone access and try again.');
+        setStatus('❌ ' + err.message, '#f44336');
+        alert('Microphone error: ' + err.message);
     }}
 }}
 
 function stopListening() {{
-    console.log('⏹️ Stopping listening...');
     isListening = false;
-    
-    if (processor) {{
-        processor.disconnect();
-        processor = null;
-    }}
-    if (source) {{
-        source.disconnect();
-        source = null;
-    }}
-    if (mediaStream) {{
-        mediaStream.getTracks().forEach(t => t.stop());
-        mediaStream = null;
-    }}
-    if (audioContext && audioContext.state !== 'closed') {{
-        audioContext.close();
-        audioContext = null;
-    }}
-    
+    if (processor) {{ processor.disconnect(); processor = null; }}
+    if (source) {{ source.disconnect(); source = null; }}
+    if (mediaStream) {{ mediaStream.getTracks().forEach(t => t.stop()); mediaStream = null; }}
+    if (audioContext && audioContext.state !== 'closed') {{ audioContext.close(); audioContext = null; }}
     if (ws && ws.readyState === WebSocket.OPEN) {{
-        ws.send(JSON.stringify({{type: 'stop'}}));
-        console.log('📤 Sent stop command');
+        ws.send(JSON.stringify({{ type: 'stop' }}));
     }}
-    
     document.getElementById('micBtn').textContent = '🎙 Start';
     document.getElementById('micBtn').style.background = 'linear-gradient(135deg, #4fc3f7, #7c4dff)';
-    document.getElementById('status').textContent = '⏹️ Stopped';
-    document.getElementById('status').style.color = '#888';
+    setStatus('⏹️ Stopped', '#888');
 }}
 
 connectWebSocket();
@@ -561,87 +460,12 @@ connectWebSocket();
         box-shadow: 0 4px 15px rgba(79, 195, 247, 0.3);
         width: 200px;
     ">🎙 Start</button>
-    <div id="status" style="color:#888; font-size:14px; min-height: 24px;">🔄 Connecting...</div>
+    <div id="status" style="color:#888; font-size:14px; min-height:24px; text-align:center;">🔄 Connecting...</div>
 </div>
 """
 
-st.components.v1.html(audio_html, height=200)
+components.html(audio_html, height=150)
 
-# ── Hidden Voice Input Receiver ──────────────────────────────────────────────
-# This creates a hidden input that JavaScript can write to
-# The input is hidden using CSS
-st.markdown("""
-<style>
-    .hidden-voice-input {
-        display: none !important;
-    }
-</style>
-""", unsafe_allow_html=True)
-
-if "voice_query" not in st.session_state:
-    st.session_state.voice_query = ""
-
-# Hidden text input - JavaScript will write to this
-voice_query = st.text_input(
-    "Voice Query",
-    key="voice_query",
-    label_visibility="collapsed",
-    placeholder="",
-    value=st.session_state.voice_query
-)
-
-# Process the voice query if it's not empty and not already processed
-if voice_query and voice_query not in [msg["content"] for msg in st.session_state.messages if msg["role"] == "user"]:
-    # Clear the input immediately to prevent reprocessing
-    st.session_state.voice_query = ""
-    
-    # Process the query
-    st.session_state.messages.append({"role": "user", "content": voice_query})
-    with st.spinner("🤔 Thinking..."):
-        response = process_query(voice_query)
-        st.session_state.messages.append({"role": "assistant", "content": response})
-    st.rerun()
-
-# ── Voice Transcript Display & Send ──────────────────────────────────────────
-if "latest_transcript" not in st.session_state:
-    st.session_state.latest_transcript = ""
-
-# Show the latest transcript with a send button
-if st.session_state.latest_transcript:
-    st.divider()
-    col1, col2, col3 = st.columns([1, 3, 1])
-    with col2:
-        st.info(f"🎤 You said: **{st.session_state.latest_transcript}**")
-        if st.button("📤 Send to Bot", use_container_width=True, type="primary"):
-            query = st.session_state.latest_transcript
-            st.session_state.latest_transcript = ""
-            st.session_state.messages.append({"role": "user", "content": query})
-            with st.spinner("🤔 Thinking..."):
-                response = process_query(query)
-                st.session_state.messages.append({"role": "assistant", "content": response})
-            st.rerun()
-
-# ── Auto-Process Voice Transcripts ────────────────────────────────────────────
-# This catches transcripts from the audio component and processes them
-if "pending_voice_query" not in st.session_state:
-    st.session_state.pending_voice_query = ""
-
-# Check if there's a pending voice query to process
-if st.session_state.pending_voice_query:
-    query = st.session_state.pending_voice_query
-    st.session_state.pending_voice_query = ""  # Clear it immediately
-    
-    # Add to messages as user
-    st.session_state.messages.append({"role": "user", "content": query})
-    
-    # Process with the bot
-    with st.spinner("🤔 Thinking..."):
-        response = process_query(query)
-        st.session_state.messages.append({"role": "assistant", "content": response})
-    
-    st.rerun()
-
-# ── Text Input ────────────────────────────────────────────────────────────────
 st.divider()
 if prompt := st.chat_input("Or type your question here..."):
     st.session_state.messages.append({"role": "user", "content": prompt})
@@ -650,22 +474,17 @@ if prompt := st.chat_input("Or type your question here..."):
         st.session_state.messages.append({"role": "assistant", "content": response})
     st.rerun()
 
-# ── Clear Chat ────────────────────────────────────────────────────────────────
 col1, col2, col3 = st.columns([1, 1, 1])
 with col2:
     if st.button("🗑️ Clear Chat", use_container_width=True):
         st.session_state.messages = []
-        st.session_state.interim_text = ""
         st.rerun()
 
-# ── Knowledge Base Upload ─────────────────────────────────────────────────────
 with st.expander("📚 Knowledge Base"):
     st.caption("Upload text files to build a custom knowledge base for RAG")
     uploaded_files = st.file_uploader(
-        "Choose .txt files",
-        type=["txt"],
-        accept_multiple_files=True,
-        key="kb_upload"
+        "Choose .txt files", type=["txt"],
+        accept_multiple_files=True, key="kb_upload"
     )
     if uploaded_files and st.button("Build Knowledge Base", use_container_width=True):
         with st.spinner("Building index..."):
@@ -677,14 +496,13 @@ with st.expander("📚 Knowledge Base"):
             except Exception as e:
                 st.error(f"Error building index: {e}")
 
-# ── Debug Info ────────────────────────────────────────────────────────────────
-st.json({
-    "lang": st.session_state.lang,
-    "lang_set": st.session_state.lang_set,
-    "messages_count": len(st.session_state.messages),
-    "is_listening": st.session_state.is_listening,
-    "db_exists": str(DB_PATH.exists()),
-    "groq_key": "✅" if GROQ_API_KEY else "❌",
-    "deepgram_key": "✅" if DEEPGRAM_API_KEY else "❌",
-    "ws_url": ws_url,
-})
+with st.expander("ℹ️ Debug Info"):
+    st.json({
+        "lang": st.session_state.lang,
+        "lang_set": st.session_state.lang_set,
+        "messages_count": len(st.session_state.messages),
+        "db_exists": str(DB_PATH.exists()),
+        "groq_key": "✅" if GROQ_API_KEY else "❌",
+        "deepgram_key": "✅" if DEEPGRAM_API_KEY else "❌",
+        "ws_url": ws_url,
+    })
