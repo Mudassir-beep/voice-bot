@@ -516,7 +516,7 @@ with st.expander("📚 Knowledge Base"):
                 st.error(f"Error building index: {e}")
 
 with st.expander("ℹ️ Debug Info"):
-    st.json({{
+    st.json({
         "lang": st.session_state.lang,
         "lang_set": st.session_state.lang_set,
         "messages_count": len(st.session_state.messages),
@@ -524,4 +524,4 @@ with st.expander("ℹ️ Debug Info"):
         "groq_key": "✅" if GROQ_API_KEY else "❌",
         "deepgram_key": "✅" if DEEPGRAM_API_KEY else "❌",
         "ws_url": ws_url,
-    }})
+    })
