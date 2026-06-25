@@ -58,7 +58,7 @@ async def process_query(text: str, lang: str = "en") -> str:
     if not groq_client:
         return "I'm sorry, I cannot process that right now."
     try:
-        system = f"You are Reem, a professional call-centre agent for Bin Dawood Holdings. Reply in {lang}. Be concise and friendly. Keep responses under 2 sentences."
+        system = f"You are Reem, a professional call-centre agent for XYZ Holdings. Reply in {lang}. Be concise and friendly. Keep responses under 2 sentences."
         r = groq_client.chat.completions.create(
             model="llama-3.3-70b-versatile",
             temperature=0.1,
