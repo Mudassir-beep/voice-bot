@@ -54,28 +54,69 @@ def detect_lang(text: str):
             return code
     return None
 
-async def process_query(text: str, lang: str = "en") -> str:
+
+# ── Streaming LLM response ────────────────────────────────────────────────────
+async def stream_query(
+    text: str,
+    lang: str,
+    client_ws: WebSocket,
+    barge_event: asyncio.Event,
+    context: str = "",
+) -> str:
+    """Stream LLM tokens to client, respecting barge-in interruption."""
     if not groq_client:
+        await client_ws.send_json({"type": "stream_token", "token": "I'm sorry, I cannot process that right now.", "done": True})
         return "I'm sorry, I cannot process that right now."
+
+    system = (
+        f"You are Reem, a professional call-centre agent for Bin Dawood Holdings. "
+        f"Reply in {'Arabic' if lang == 'ar' else 'English'}. "
+        f"Be concise and friendly. Keep responses under 3 sentences."
+    )
+    user_content = f"Context:\n{context}\n\nQuestion: {text}" if context else text
+
+    full_response = ""
     try:
-        system = f"You are Reem, a professional call-centre agent for Bin Dawood Holdings. Reply in {lang}. Be concise and friendly. Keep responses under 2 sentences."
-        r = groq_client.chat.completions.create(
+        stream = groq_client.chat.completions.create(
             model="llama-3.3-70b-versatile",
             temperature=0.1,
-            max_tokens=150,
+            max_tokens=200,
             messages=[
                 {"role": "system", "content": system},
-                {"role": "user", "content": text},
+                {"role": "user", "content": user_content},
             ],
+            stream=True,
         )
-        return r.choices[0].message.content.strip()
+
+        for chunk in stream:
+            # Check for barge-in interruption
+            if barge_event.is_set():
+                log.info("Barge-in detected — stopping stream")
+                await client_ws.send_json({"type": "stream_interrupted"})
+                return full_response
+
+            token = chunk.choices[0].delta.content or ""
+            if token:
+                full_response += token
+                await client_ws.send_json({
+                    "type": "stream_token",
+                    "token": token,
+                    "done": False,
+                })
+                await asyncio.sleep(0)  # yield to event loop
+
+        await client_ws.send_json({"type": "stream_token", "token": "", "done": True})
+        return full_response
+
     except Exception as e:
-        log.error(f"Groq error: {e}")
-        return "I'm having trouble processing that. Please try again."
+        log.error(f"Groq streaming error: {e}")
+        msg = "I'm having trouble processing that. Please try again."
+        await client_ws.send_json({"type": "stream_token", "token": msg, "done": True})
+        return msg
+
 
 async def text_to_speech(text: str, lang: str = "en") -> Optional[bytes]:
     if not EDGE_TTS_AVAILABLE:
-        log.warning("edge-tts not available")
         return None
     voice = TTS_VOICES.get(lang, TTS_VOICES["en"])
     try:
@@ -90,6 +131,7 @@ async def text_to_speech(text: str, lang: str = "en") -> Optional[bytes]:
     except Exception as e:
         log.error(f"TTS error: {e}")
         return None
+
 
 # ── Streamlit startup ─────────────────────────────────────────────────────────
 def is_port_in_use(port):
@@ -124,15 +166,22 @@ else:
 
 app = FastAPI()
 
+
 # ── Deepgram streaming ────────────────────────────────────────────────────────
-async def deepgram_stream(session_id: str, client_ws: WebSocket, audio_q: asyncio.Queue, session_state: dict):
+async def deepgram_stream(
+    session_id: str,
+    client_ws: WebSocket,
+    audio_q: asyncio.Queue,
+    session_state: dict,
+    barge_event: asyncio.Event,
+):
     if not DEEPGRAM_API_KEY:
         log.error("No Deepgram API key")
         return
 
     params = (
         "model=nova-2&punctuate=true&interim_results=true"
-        "&utterance_end_ms=1000&vad_events=true&smart_format=true"
+        "&utterance_end_ms=800&vad_events=true&smart_format=true"
         "&encoding=linear16&sample_rate=16000&channels=1&endpointing=true"
     )
     headers = [("Authorization", f"Token {DEEPGRAM_API_KEY}")]
@@ -168,14 +217,25 @@ async def deepgram_stream(session_id: str, client_ws: WebSocket, audio_q: asynci
                             is_final = data.get("is_final", False)
 
                             if text and not is_final:
+                                # Barge-in: user is speaking while AI is speaking/streaming
+                                if session_state.get("ai_speaking") or session_state.get("ai_streaming"):
+                                    barge_event.set()
+                                    session_state["ai_speaking"] = False
+                                    session_state["ai_streaming"] = False
+                                    await client_ws.send_json({"type": "barge_in"})
+                                    log.info(f"[{session_id}] Barge-in triggered by interim speech")
+
                                 await client_ws.send_json({
                                     "type": "transcript",
                                     "text": text,
-                                    "is_final": False
+                                    "is_final": False,
                                 })
 
                             if text and is_final:
                                 log.info(f"[{session_id}] Final: {text}")
+
+                                # Clear barge event for new utterance
+                                barge_event.clear()
 
                                 detected = detect_lang(text)
                                 if detected:
@@ -185,27 +245,37 @@ async def deepgram_stream(session_id: str, client_ws: WebSocket, audio_q: asynci
                                 await client_ws.send_json({
                                     "type": "transcript",
                                     "text": text,
-                                    "is_final": True
+                                    "is_final": True,
                                 })
 
-                                response_text = await process_query(text, lang)
-                                log.info(f"[{session_id}] Response: {response_text}")
+                                # Retrieve RAG context from session
+                                context = session_state.get("rag_context_fn", lambda q: "")(text)
 
-                                await client_ws.send_json({
-                                    "type": "response",
-                                    "text": response_text,
-                                    "lang": lang
-                                })
+                                # Stream the response
+                                session_state["ai_streaming"] = True
+                                response_text = await stream_query(
+                                    text, lang, client_ws, barge_event, context
+                                )
+                                session_state["ai_streaming"] = False
 
-                                audio_bytes = await text_to_speech(response_text, lang)
-                                if audio_bytes:
-                                    audio_b64 = base64.b64encode(audio_bytes).decode()
-                                    await client_ws.send_json({
-                                        "type": "audio_response",
-                                        "audio": audio_b64,
-                                        "format": "mp3"
-                                    })
-                                    log.info(f"[{session_id}] TTS sent")
+                                if barge_event.is_set():
+                                    barge_event.clear()
+                                    continue
+
+                                # TTS
+                                if response_text.strip():
+                                    session_state["ai_speaking"] = True
+                                    audio_bytes = await text_to_speech(response_text, lang)
+                                    session_state["ai_speaking"] = False
+
+                                    if audio_bytes and not barge_event.is_set():
+                                        audio_b64 = base64.b64encode(audio_bytes).decode()
+                                        await client_ws.send_json({
+                                            "type": "audio_response",
+                                            "audio": audio_b64,
+                                            "format": "mp3",
+                                        })
+                                        log.info(f"[{session_id}] TTS sent")
 
                     except Exception as e:
                         log.error(f"[{session_id}] DG recv error: {e}")
@@ -222,7 +292,13 @@ async def audio_websocket(websocket: WebSocket):
     await websocket.accept()
     session_id = str(id(websocket))
     audio_q: asyncio.Queue = asyncio.Queue()
-    session_state = {"lang": "en"}
+    barge_event = asyncio.Event()
+    session_state = {
+        "lang": "en",
+        "ai_speaking": False,
+        "ai_streaming": False,
+        "rag_context_fn": lambda q: "",
+    }
     dg_task = None
     log.info(f"[{session_id}] Audio client connected")
 
@@ -233,9 +309,10 @@ async def audio_websocket(websocket: WebSocket):
 
             if msg_type == "start":
                 session_state["lang"] = data.get("lang", "en")
+                barge_event.clear()
                 audio_q = asyncio.Queue()
                 dg_task = asyncio.create_task(
-                    deepgram_stream(session_id, websocket, audio_q, session_state)
+                    deepgram_stream(session_id, websocket, audio_q, session_state, barge_event)
                 )
 
             elif msg_type == "audio":
@@ -244,6 +321,13 @@ async def audio_websocket(websocket: WebSocket):
 
             elif msg_type == "set_lang":
                 session_state["lang"] = data.get("lang", "en")
+
+            elif msg_type == "barge_in":
+                # Manual barge-in signal from client
+                barge_event.set()
+                session_state["ai_speaking"] = False
+                session_state["ai_streaming"] = False
+                log.info(f"[{session_id}] Manual barge-in received")
 
             elif msg_type == "stop":
                 await audio_q.put(None)
@@ -259,6 +343,60 @@ async def audio_websocket(websocket: WebSocket):
         log.error(f"[{session_id}] Audio WS error: {e}")
     finally:
         await audio_q.put(None)
+
+
+# ── /chat — text streaming WebSocket ─────────────────────────────────────────
+@app.websocket("/chat")
+async def chat_websocket(websocket: WebSocket):
+    """Dedicated endpoint for streaming text chat with barge-in (cancel) support."""
+    await websocket.accept()
+    session_id = str(id(websocket))
+    barge_event = asyncio.Event()
+    session_state = {"lang": "en", "ai_streaming": False}
+    stream_task = None
+    log.info(f"[{session_id}] Chat client connected")
+
+    try:
+        async for raw in websocket.iter_text():
+            data = json.loads(raw)
+            msg_type = data.get("type")
+
+            if msg_type == "chat":
+                # Cancel any ongoing stream
+                if stream_task and not stream_task.done():
+                    barge_event.set()
+                    try:
+                        await asyncio.wait_for(stream_task, timeout=1.0)
+                    except (asyncio.TimeoutError, asyncio.CancelledError):
+                        stream_task.cancel()
+
+                barge_event.clear()
+                lang = data.get("lang", session_state.get("lang", "en"))
+                session_state["lang"] = lang
+                query = data.get("text", "").strip()
+                context = data.get("context", "")
+
+                if query:
+                    session_state["ai_streaming"] = True
+                    stream_task = asyncio.create_task(
+                        stream_query(query, lang, websocket, barge_event, context)
+                    )
+                    await stream_task
+                    session_state["ai_streaming"] = False
+
+            elif msg_type == "cancel":
+                barge_event.set()
+                session_state["ai_streaming"] = False
+                await websocket.send_json({"type": "stream_interrupted"})
+                log.info(f"[{session_id}] Stream cancelled by user")
+
+            elif msg_type == "set_lang":
+                session_state["lang"] = data.get("lang", "en")
+
+    except WebSocketDisconnect:
+        log.info(f"[{session_id}] Chat client disconnected")
+    except Exception as e:
+        log.error(f"[{session_id}] Chat WS error: {e}")
 
 
 # ── Streamlit WS proxy ────────────────────────────────────────────────────────
