@@ -125,7 +125,12 @@ else:
 app = FastAPI()
 
 # ── Deepgram streaming ────────────────────────────────────────────────────────
-async def deepgram_stream(session_id: str, client_ws: WebSocket, audio_q: asyncio.Queue, session_state: dict):
+async def deepgram_stream(
+    session_id: str,
+    client_ws: WebSocket,
+    audio_q: asyncio.Queue,
+    session_state: dict,
+):
     if not DEEPGRAM_API_KEY:
         log.error("No Deepgram API key")
         return
@@ -137,6 +142,10 @@ async def deepgram_stream(session_id: str, client_ws: WebSocket, audio_q: asynci
     )
     headers = [("Authorization", f"Token {DEEPGRAM_API_KEY}")]
     uri = f"wss://api.deepgram.com/v1/listen?{params}"
+
+    # ── Per-session lock: only one LLM+TTS pipeline runs at a time ──────────
+    # This prevents double-responses if two finals arrive in quick succession.
+    processing_lock = asyncio.Lock()
 
     try:
         async with ws_lib.connect(uri, additional_headers=headers) as dg_ws:
@@ -175,6 +184,12 @@ async def deepgram_stream(session_id: str, client_ws: WebSocket, audio_q: asynci
                                 })
 
                             if text and is_final:
+                                # ── Guard: skip if barge_in flagged ─────────
+                                if session_state.get("barge_in"):
+                                    log.info(f"[{session_id}] Skipping final (barge-in active): {text}")
+                                    session_state["barge_in"] = False
+                                    continue
+
                                 log.info(f"[{session_id}] Final: {text}")
 
                                 detected = detect_lang(text)
@@ -188,24 +203,31 @@ async def deepgram_stream(session_id: str, client_ws: WebSocket, audio_q: asynci
                                     "is_final": True
                                 })
 
-                                response_text = await process_query(text, lang)
-                                log.info(f"[{session_id}] Response: {response_text}")
+                                # ── Serialize LLM+TTS so duplicate finals don't stack ──
+                                async with processing_lock:
+                                    # Skip stale finals that arrived while processing
+                                    if session_state.get("barge_in"):
+                                        session_state["barge_in"] = False
+                                        continue
 
-                                await client_ws.send_json({
-                                    "type": "response",
-                                    "text": response_text,
-                                    "lang": lang
-                                })
+                                    response_text = await process_query(text, lang)
+                                    log.info(f"[{session_id}] Response: {response_text}")
 
-                                audio_bytes = await text_to_speech(response_text, lang)
-                                if audio_bytes:
-                                    audio_b64 = base64.b64encode(audio_bytes).decode()
                                     await client_ws.send_json({
-                                        "type": "audio_response",
-                                        "audio": audio_b64,
-                                        "format": "mp3"
+                                        "type": "response",
+                                        "text": response_text,
+                                        "lang": lang
                                     })
-                                    log.info(f"[{session_id}] TTS sent")
+
+                                    audio_bytes = await text_to_speech(response_text, lang)
+                                    if audio_bytes:
+                                        audio_b64 = base64.b64encode(audio_bytes).decode()
+                                        await client_ws.send_json({
+                                            "type": "audio_response",
+                                            "audio": audio_b64,
+                                            "format": "mp3"
+                                        })
+                                        log.info(f"[{session_id}] TTS sent")
 
                     except Exception as e:
                         log.error(f"[{session_id}] DG recv error: {e}")
@@ -216,14 +238,24 @@ async def deepgram_stream(session_id: str, client_ws: WebSocket, audio_q: asynci
         log.error(f"[{session_id}] Deepgram error: {e}")
 
 
+async def _cancel_task(task: Optional[asyncio.Task]):
+    """Cancel a task and wait for it to finish cleanly."""
+    if task and not task.done():
+        task.cancel()
+        try:
+            await asyncio.wait_for(asyncio.shield(task), timeout=2.0)
+        except (asyncio.CancelledError, asyncio.TimeoutError):
+            pass
+
+
 # ── /ws — audio WebSocket ─────────────────────────────────────────────────────
 @app.websocket("/ws")
 async def audio_websocket(websocket: WebSocket):
     await websocket.accept()
     session_id = str(id(websocket))
     audio_q: asyncio.Queue = asyncio.Queue()
-    session_state = {"lang": "en"}
-    dg_task = None
+    session_state = {"lang": "en", "barge_in": False}
+    dg_task: Optional[asyncio.Task] = None
     log.info(f"[{session_id}] Audio client connected")
 
     try:
@@ -233,18 +265,16 @@ async def audio_websocket(websocket: WebSocket):
 
             if msg_type == "start":
                 session_state["lang"] = data.get("lang", "en")
-                if dg_task and not dg_task.done():
-                    dg_task.cancel()
-                audio_q = asyncio.Queue()
+                session_state["barge_in"] = False
+
+                # Properly cancel old task before starting a new one
+                await _cancel_task(dg_task)
+
+                audio_q = asyncio.Queue()   # fresh queue for new session
                 dg_task = asyncio.create_task(
-                    deepgram_stream(
-                        session_id,
-                        websocket,
-                        audio_q,
-                        session_state
-                    )
+                    deepgram_stream(session_id, websocket, audio_q, session_state)
                 )
-                log.info(f"[{session_id}] START RECEIVED")
+                log.info(f"[{session_id}] START — new DG session, lang={session_state['lang']}")
 
             elif msg_type == "audio":
                 audio_bytes = base64.b64decode(data.get("data", ""))
@@ -253,13 +283,19 @@ async def audio_websocket(websocket: WebSocket):
             elif msg_type == "set_lang":
                 session_state["lang"] = data.get("lang", "en")
 
+            elif msg_type == "barge_in":
+                # Client interrupted playback — flag so server drops next final transcript
+                session_state["barge_in"] = True
+                log.info(f"[{session_id}] Barge-in received")
+
+            elif msg_type == "tts_done":
+                # Client finished playing TTS — nothing needed server-side
+                log.info(f"[{session_id}] TTS done acknowledged")
+
             elif msg_type == "stop":
                 await audio_q.put(None)
-                if dg_task:
-                    try:
-                        await asyncio.wait_for(dg_task, timeout=3.0)
-                    except asyncio.TimeoutError:
-                        dg_task.cancel()
+                await _cancel_task(dg_task)
+                dg_task = None
 
     except WebSocketDisconnect:
         log.info(f"[{session_id}] Audio client disconnected")
@@ -267,6 +303,7 @@ async def audio_websocket(websocket: WebSocket):
         log.error(f"[{session_id}] Audio WS error: {e}")
     finally:
         await audio_q.put(None)
+        await _cancel_task(dg_task)
 
 
 # ── Streamlit WS proxy ────────────────────────────────────────────────────────
