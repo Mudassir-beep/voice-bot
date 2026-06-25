@@ -476,9 +476,6 @@ connectWebSocket();
 </script>
 
 <div style="display:flex; flex-direction:column; align-items:center; gap:15px; padding:10px;">
-    <div id="avatar" class="avatar">
-    <img src="data:image/jpeg;base64,{AGENT_PHOTO}" style="width:100%;height:100%;border-radius:50%;object-fit:cover;">
-</div>
     <button id="micBtn" onclick="toggleListening()" style="
         padding: 16px 48px;
         border-radius: 50px;
