@@ -298,17 +298,21 @@ audio_html = f"""
 <script>
 const WS_URL = '{ws_url}';
 let ws = null;
+let wsConnected = false;          // ← singleton guard
 let isListening = false;
-let isSpeaking = false;
+let isSpeaking = false;           // ← barge-in gate flag
 let audioContext = null;
 let mediaStream = null;
 let source = null;
 let processor = null;
 let currentLang = '{st.session_state.lang}';
+let currentAudio = null;          // ← track playing audio element
 
 function connectWebSocket() {{
+    if (wsConnected) return;      // ← prevent duplicate connections
     ws = new WebSocket(WS_URL);
     ws.onopen = function() {{
+        wsConnected = true;
         setStatus('🟢 Connected - click Start', '#4caf50');
     }};
     ws.onmessage = function(event) {{
@@ -316,6 +320,19 @@ function connectWebSocket() {{
             const data = JSON.parse(event.data);
 
             if (data.type === 'transcript' && !data.is_final && data.text) {{
+                // ── BARGE-IN: user spoke while agent talking ──────────────
+                if (isSpeaking && currentAudio) {{
+                    currentAudio.pause();
+                    currentAudio.currentTime = 0;
+                    currentAudio = null;
+                    isSpeaking = false;
+                    setAvatar('listening');
+                    setStatus('🎤 Listening... Speak now', '#4caf50');
+                    // Tell server TTS was interrupted so it can reset state
+                    if (ws && ws.readyState === WebSocket.OPEN) {{
+                        ws.send(JSON.stringify({{ type: 'barge_in' }}));
+                    }}
+                }}
                 setStatus('💭 ' + data.text, '#ff9800');
             }}
 
@@ -338,6 +355,7 @@ function connectWebSocket() {{
         }}
     }};
     ws.onclose = function() {{
+        wsConnected = false;
         setStatus('🔄 Reconnecting...', '#ff9800');
         setTimeout(connectWebSocket, 2000);
     }};
@@ -360,6 +378,12 @@ function setAvatar(state) {{
 
 function playAudio(base64Audio) {{
     try {{
+        // Stop any currently playing audio before starting new one
+        if (currentAudio) {{
+            currentAudio.pause();
+            currentAudio = null;
+        }}
+
         isSpeaking = true;
         const binary = atob(base64Audio);
         const bytes = new Uint8Array(binary.length);
@@ -369,15 +393,23 @@ function playAudio(base64Audio) {{
         const blob = new Blob([bytes], {{ type: 'audio/mp3' }});
         const url = URL.createObjectURL(blob);
         const audio = new Audio(url);
+        currentAudio = audio;   // ← track it for barge-in cancellation
+
         audio.onended = function() {{
             URL.revokeObjectURL(url);
+            if (currentAudio === audio) currentAudio = null;
             isSpeaking = false;
             if (isListening) {{
                 setAvatar('listening');
                 setStatus('🎤 Listening... Speak now', '#4caf50');
+                // Signal server that TTS finished so it's ready for next utterance
+                if (ws && ws.readyState === WebSocket.OPEN) {{
+                    ws.send(JSON.stringify({{ type: 'tts_done' }}));
+                }}
             }}
         }};
         audio.onerror = function() {{
+            if (currentAudio === audio) currentAudio = null;
             isSpeaking = false;
             if (isListening) setAvatar('listening');
         }};
@@ -385,6 +417,7 @@ function playAudio(base64Audio) {{
     }} catch(e) {{
         console.error('Audio play error:', e);
         isSpeaking = false;
+        currentAudio = null;
     }}
 }}
 
@@ -418,7 +451,13 @@ async function startListening() {{
 
         processor.onaudioprocess = function(e) {{
             if (!isListening || !ws || ws.readyState !== WebSocket.OPEN) return;
-         
+
+            // ── BARGE-IN GATE: suppress mic audio to Deepgram while agent speaks ──
+            // We still allow data through so Deepgram can detect voice activity,
+            // but we do NOT block interim transcripts (handled in onmessage above).
+            // Remove the next two lines if you want true full barge-in:
+            // (keeping them means the agent finishes current sentence before responding)
+            // if (isSpeaking) return;
 
             const inputData = e.inputBuffer.getChannelData(0);
             let sum = 0;
@@ -460,6 +499,7 @@ async function startListening() {{
 function stopListening() {{
     isListening = false;
     isSpeaking = false;
+    if (currentAudio) {{ currentAudio.pause(); currentAudio = null; }}
     if (processor) {{ processor.disconnect(); processor = null; }}
     if (source) {{ source.disconnect(); source = null; }}
     if (mediaStream) {{ mediaStream.getTracks().forEach(t => t.stop()); mediaStream = null; }}
