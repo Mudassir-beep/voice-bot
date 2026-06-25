@@ -1,40 +1,194 @@
 import logging
 import os
+import re
+import sqlite3
+from pathlib import Path
+from typing import Optional
 import base64
 
 with open("agent_photo.jpg", "rb") as f:
     AGENT_PHOTO = base64.b64encode(f.read()).decode()
 
+import faiss
+import numpy as np
 import streamlit as st
+from groq import Groq
+from sentence_transformers import SentenceTransformer
 import streamlit.components.v1 as components
-
-from core import (
-    build_index,
-    detect_lang,
-    process_query_core,
-    DB_PATH,
-    GROQ_API_KEY,
-)
 
 logging.basicConfig(level=logging.INFO)
 log = logging.getLogger("reem")
 
+GROQ_API_KEY = os.environ.get("GROQ_API_KEY", "")
 DEEPGRAM_API_KEY = os.environ.get("DEEPGRAM_API_KEY", "")
 PORT = int(os.environ.get("PORT", 8080))
 
+EMBED_MODEL = "all-MiniLM-L6-v2"
+FAISS_INDEX_PATH = "/tmp/faiss.index"
+CHUNKS_PATH = "/tmp/chunks.npy"
+DB_PATH = Path(__file__).parent / "saudi_orders_database.db"
+TOP_K = 3
+
+DB_SCHEMA = """Table: orders
+Columns:
+order_id INTEGER (primary key)
+order_date TEXT
+customer_name TEXT
+customer_city TEXT
+customer_address TEXT
+status TEXT (Delivered / In Transit / Pending)
+delivery_date TEXT
+comments TEXT"""
+
+_embedder: Optional[SentenceTransformer] = None
+_faiss_index = None
+_chunks: Optional[np.ndarray] = None
+
+def get_embedder():
+    global _embedder
+    if _embedder is None:
+        _embedder = SentenceTransformer(EMBED_MODEL)
+    return _embedder
+
+def try_load_index():
+    global _faiss_index, _chunks
+    if Path(FAISS_INDEX_PATH).exists() and Path(CHUNKS_PATH).exists():
+        _faiss_index = faiss.read_index(FAISS_INDEX_PATH)
+        _chunks = np.load(CHUNKS_PATH, allow_pickle=True)
+        log.info(f"FAISS loaded: {len(_chunks)} chunks")
+
+def build_index(texts: list[str]):
+    global _faiss_index, _chunks
+    embedder = get_embedder()
+    raw_chunks = []
+    for text in texts:
+        for i in range(0, max(1, len(text) - 50), 450):
+            raw_chunks.append(text[i:i + 500].strip())
+    raw_chunks = [c for c in raw_chunks if c]
+    embeddings = embedder.encode(raw_chunks, convert_to_numpy=True).astype(np.float32)
+    faiss.normalize_L2(embeddings)
+    index = faiss.IndexFlatIP(embeddings.shape[1])
+    index.add(embeddings)
+    faiss.write_index(index, FAISS_INDEX_PATH)
+    np.save(CHUNKS_PATH, np.array(raw_chunks, dtype=object))
+    _faiss_index = index
+    _chunks = np.array(raw_chunks, dtype=object)
+    log.info(f"Index built: {len(raw_chunks)} chunks")
+
+try_load_index()
+groq_client = Groq(api_key=GROQ_API_KEY) if GROQ_API_KEY else None
+
+LANG_KEYWORDS = {
+    "en": ["english", "inglés"],
+    "ar": ["arabic", "عربي", "عربية", "العربية"],
+}
+NO_ORDER = {
+    "en": "Please provide your order ID so I can track it for you.",
+    "ar": "يرجى تزويدي برقم الطلب حتى أتمكن من تتبعه.",
+}
+NOT_FOUND = {
+    "en": "I couldn't find an order with that ID. Please check and try again.",
+    "ar": "لم أجد طلباً بهذا الرقم. يرجى التحقق والمحاولة مرة أخرى.",
+}
+
+def route(query: str) -> str:
+    if not groq_client:
+        return "rag"
+    try:
+        r = groq_client.chat.completions.create(
+            model="llama-3.3-70b-versatile", temperature=0, max_tokens=5,
+            messages=[{"role": "user", "content": f"Reply with ONE word only — 'sql' or 'rag'.\nQuery: {query}"}],
+        )
+        return r.choices[0].message.content.strip().lower()
+    except Exception:
+        return "rag"
+
+def retrieve(query: str):
+    if _faiss_index is None or _chunks is None:
+        return []
+    embedder = get_embedder()
+    q = embedder.encode([query], convert_to_numpy=True).astype(np.float32)
+    faiss.normalize_L2(q)
+    _, ids = _faiss_index.search(q, TOP_K)
+    return [_chunks[i] for i in ids[0] if i >= 0]
+
+def generate_sql(query: str) -> str:
+    if not groq_client:
+        return "SELECT * FROM orders LIMIT 1"
+    try:
+        r = groq_client.chat.completions.create(
+            model="llama-3.3-70b-versatile", temperature=0, max_tokens=150,
+            messages=[{"role": "user", "content": f"Schema:\n{DB_SCHEMA}\nReturn ONLY raw SELECT SQL.\nQuery: {query}"}],
+        )
+        return re.sub(r"```.*```", "", r.choices[0].message.content.strip(), flags=re.DOTALL).strip()
+    except Exception:
+        return "SELECT * FROM orders LIMIT 1"
+
+def run_sql(sql: str):
+    if not DB_PATH.exists():
+        return None, f"Database not found at {DB_PATH}"
+    try:
+        conn = sqlite3.connect(str(DB_PATH))
+        cur = conn.cursor()
+        cur.execute(sql)
+        rows = cur.fetchall()
+        cols = [d[0] for d in cur.description] if cur.description else []
+        conn.close()
+        return (cols, rows), None
+    except Exception as e:
+        return None, str(e)
+
+def detect_lang(text: str):
+    t = text.lower()
+    for code, kws in LANG_KEYWORDS.items():
+        if any(k in t for k in kws):
+            return code
+    return None
 
 def process_query(query: str) -> str:
-    """Thin wrapper that resolves lang from Streamlit session_state then delegates to core."""
     if not query.strip():
         return "Please ask a question."
-    # Update session lang if user mentioned a language preference
     if not st.session_state.lang_set:
         lang = detect_lang(query)
         if lang:
             st.session_state.lang = lang
             st.session_state.lang_set = True
-    return process_query_core(query, lang=st.session_state.lang)
-
+    intent = route(query)
+    if intent == "sql":
+        match = re.search(r"\b\d{3,}\b", query)
+        if not match:
+            return NO_ORDER[st.session_state.lang]
+        sql = generate_sql(query)
+        result, err = run_sql(sql)
+        if err or not result or not result[1]:
+            return NOT_FOUND[st.session_state.lang]
+        cols, rows = result
+        try:
+            r = groq_client.chat.completions.create(
+                model="llama-3.3-70b-versatile", temperature=0.1, max_tokens=180,
+                messages=[{"role": "user", "content":
+                    f"You are Reem. Answer in {st.session_state.lang} in ≤3 friendly sentences.\nResult: {rows}"}],
+            )
+            return r.choices[0].message.content.strip()
+        except Exception:
+            return f"Found {len(rows)} orders."
+    else:
+        ctx = retrieve(query)
+        context = "\n\n".join(ctx[:2])[:2800] if ctx else ""
+        system = "You are Reem, a professional call-centre agent for XYZ Holdings. Be concise, polite and friendly."
+        user = (f"Context:\n{context}\n\nQuestion: {query}" if context else f"Question: {query}")
+        try:
+            r = groq_client.chat.completions.create(
+                model="llama-3.3-70b-versatile", temperature=0.1, max_tokens=200,
+                messages=[
+                    {"role": "system", "content": system},
+                    {"role": "user", "content": user},
+                ],
+            )
+            return r.choices[0].message.content.strip()
+        except Exception as e:
+            log.error(f"LLM error: {e}")
+            return "I'm having trouble processing that. Please try again."
 
 # ── Streamlit UI ──────────────────────────────────────────────────────────────
 st.set_page_config(
@@ -92,14 +246,13 @@ st.markdown("""
 col1, col2, col3 = st.columns([1, 1, 1])
 with col2:
     st.markdown(
-        f'''
-        <div class="avatar" id="main-avatar">
-            <img src="data:image/jpeg;base64,{AGENT_PHOTO}"
-                 style="width:100%;height:100%;border-radius:50%;object-fit:cover;">
-        </div>
-        ''',
-        unsafe_allow_html=True
-    )
+    f'''
+    <div class="avatar" id="main-avatar">
+        <img src="data:image/jpeg;base64,{AGENT_PHOTO}" style="width:100%;height:100%;border-radius:50%;object-fit:cover;">
+    </div>
+    ''',
+    unsafe_allow_html=True
+)
     st.title("Reem")
     st.caption("XYZ Holdings - Voice Agent")
 st.divider()
@@ -133,7 +286,7 @@ for msg in st.session_state.messages:
         st.write(msg["content"])
 
 railway_domain = os.environ.get("RAILWAY_PUBLIC_DOMAIN", "")
-render_domain  = os.environ.get("RENDER_EXTERNAL_URL", "")
+render_domain = os.environ.get("RENDER_EXTERNAL_URL", "")
 if railway_domain:
     ws_url = f"wss://{railway_domain}/ws"
 elif render_domain:
@@ -145,18 +298,18 @@ audio_html = f"""
 <script>
 const WS_URL = '{ws_url}';
 let ws = null;
-let wsConnected = false;
+let wsConnected = false;          // ← singleton guard
 let isListening = false;
-let isSpeaking = false;
+let isSpeaking = false;           // ← barge-in gate flag
 let audioContext = null;
 let mediaStream = null;
 let source = null;
 let processor = null;
 let currentLang = '{st.session_state.lang}';
-let currentAudio = null;
+let currentAudio = null;          // ← track playing audio element
 
 function connectWebSocket() {{
-    if (wsConnected) return;
+    if (wsConnected) return;      // ← prevent duplicate connections
     ws = new WebSocket(WS_URL);
     ws.onopen = function() {{
         wsConnected = true;
@@ -167,6 +320,7 @@ function connectWebSocket() {{
             const data = JSON.parse(event.data);
 
             if (data.type === 'transcript' && !data.is_final && data.text) {{
+                // ── BARGE-IN: user spoke while agent talking ──────────────
                 if (isSpeaking && currentAudio) {{
                     currentAudio.pause();
                     currentAudio.currentTime = 0;
@@ -174,6 +328,7 @@ function connectWebSocket() {{
                     isSpeaking = false;
                     setAvatar('listening');
                     setStatus('🎤 Listening... Speak now', '#4caf50');
+                    // Tell server TTS was interrupted so it can reset state
                     if (ws && ws.readyState === WebSocket.OPEN) {{
                         ws.send(JSON.stringify({{ type: 'barge_in' }}));
                     }}
@@ -223,7 +378,12 @@ function setAvatar(state) {{
 
 function playAudio(base64Audio) {{
     try {{
-        if (currentAudio) {{ currentAudio.pause(); currentAudio = null; }}
+        // Stop any currently playing audio before starting new one
+        if (currentAudio) {{
+            currentAudio.pause();
+            currentAudio = null;
+        }}
+
         isSpeaking = true;
         const binary = atob(base64Audio);
         const bytes = new Uint8Array(binary.length);
@@ -233,7 +393,7 @@ function playAudio(base64Audio) {{
         const blob = new Blob([bytes], {{ type: 'audio/mp3' }});
         const url = URL.createObjectURL(blob);
         const audio = new Audio(url);
-        currentAudio = audio;
+        currentAudio = audio;   // ← track it for barge-in cancellation
 
         audio.onended = function() {{
             URL.revokeObjectURL(url);
@@ -242,6 +402,7 @@ function playAudio(base64Audio) {{
             if (isListening) {{
                 setAvatar('listening');
                 setStatus('🎤 Listening... Speak now', '#4caf50');
+                // Signal server that TTS finished so it's ready for next utterance
                 if (ws && ws.readyState === WebSocket.OPEN) {{
                     ws.send(JSON.stringify({{ type: 'tts_done' }}));
                 }}
@@ -261,7 +422,11 @@ function playAudio(base64Audio) {{
 }}
 
 async function toggleListening() {{
-    if (isListening) {{ stopListening(); }} else {{ await startListening(); }}
+    if (isListening) {{
+        stopListening();
+    }} else {{
+        await startListening();
+    }}
 }}
 
 async function startListening() {{
@@ -286,11 +451,20 @@ async function startListening() {{
 
         processor.onaudioprocess = function(e) {{
             if (!isListening || !ws || ws.readyState !== WebSocket.OPEN) return;
+
+            // ── BARGE-IN GATE: suppress mic audio to Deepgram while agent speaks ──
+            // We still allow data through so Deepgram can detect voice activity,
+            // but we do NOT block interim transcripts (handled in onmessage above).
+            // Remove the next two lines if you want true full barge-in:
+            // (keeping them means the agent finishes current sentence before responding)
+            // if (isSpeaking) return;
+
             const inputData = e.inputBuffer.getChannelData(0);
             let sum = 0;
             for (let i = 0; i < inputData.length; i++) sum += inputData[i] * inputData[i];
             const rms = Math.sqrt(sum / inputData.length);
             if (rms < 0.0001) return;
+
             const pcm = new Int16Array(inputData.length);
             for (let i = 0; i < inputData.length; i++) {{
                 pcm[i] = Math.round(Math.max(-1, Math.min(1, inputData[i])) * 32767);
@@ -356,8 +530,7 @@ connectWebSocket();
         box-shadow: 0 4px 15px rgba(79, 195, 247, 0.3);
         width: 200px;
     ">🎙 Start</button>
-    <div id="status" style="color:#888; font-size:14px; min-height:24px;
-         text-align:center; max-width:300px; word-wrap:break-word;">🔄 Connecting...</div>
+    <div id="status" style="color:#888; font-size:14px; min-height:24px; text-align:center; max-width:300px; word-wrap:break-word;">🔄 Connecting...</div>
 </div>
 """
 
