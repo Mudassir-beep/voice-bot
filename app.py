@@ -406,7 +406,7 @@ async function startListening() {{
 
         processor.onaudioprocess = function(e) {{
             if (!isListening || !ws || ws.readyState !== WebSocket.OPEN) return;
-            if (isSpeaking) return;
+         
 
             const inputData = e.inputBuffer.getChannelData(0);
             let sum = 0;
