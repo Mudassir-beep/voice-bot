@@ -4,6 +4,10 @@ import re
 import sqlite3
 from pathlib import Path
 from typing import Optional
+import base64
+
+with open("agent_photo.jpg", "rb") as f:
+    AGENT_PHOTO = base64.b64encode(f.read()).decode()
 
 import faiss
 import numpy as np
@@ -241,7 +245,14 @@ st.markdown("""
 
 col1, col2, col3 = st.columns([1, 1, 1])
 with col2:
-    st.markdown('<div class="avatar" id="main-avatar">👩‍💼</div>', unsafe_allow_html=True)
+    st.markdown(
+    f'''
+    <div class="avatar" id="main-avatar">
+        <img src="data:image/jpeg;base64,{AGENT_PHOTO}" style="width:100%;height:100%;border-radius:50%;object-fit:cover;">
+    </div>
+    ''',
+    unsafe_allow_html=True
+)
     st.title("Reem")
     st.caption("XYZ Holdings - Voice Agent")
 st.divider()
@@ -465,7 +476,9 @@ connectWebSocket();
 </script>
 
 <div style="display:flex; flex-direction:column; align-items:center; gap:15px; padding:10px;">
-    <div id="avatar" class="avatar">👩‍💼</div>
+    <div id="avatar" class="avatar">
+    <img src="data:image/jpeg;base64,{AGENT_PHOTO}" style="width:100%;height:100%;border-radius:50%;object-fit:cover;">
+</div>
     <button id="micBtn" onclick="toggleListening()" style="
         padding: 16px 48px;
         border-radius: 50px;
