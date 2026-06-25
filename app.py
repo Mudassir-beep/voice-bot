@@ -171,7 +171,7 @@ def process_query(query: str) -> str:
     else:
         ctx = retrieve(query)
         context = "\n\n".join(ctx[:2])[:2800] if ctx else ""
-        system = "You are Reem, a professional call-centre agent for Bin Dawood Holdings. Be concise and friendly."
+        system = "You are Reem, a professional call-centre agent for XYZ Holdings. Be concise, polite and friendly."
         user = (f"Context:\n{context}\n\nQuestion: {query}" if context else f"Question: {query}")
         try:
             r = groq_client.chat.completions.create(
@@ -243,7 +243,7 @@ col1, col2, col3 = st.columns([1, 1, 1])
 with col2:
     st.markdown('<div class="avatar" id="main-avatar">👩‍💼</div>', unsafe_allow_html=True)
     st.title("Reem")
-    st.caption("Bin Dawood Holdings - Voice Agent")
+    st.caption("XYZ Holdings - Voice Agent")
 st.divider()
 
 lang_col1, lang_col2 = st.columns(2)
