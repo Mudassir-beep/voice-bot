@@ -1,208 +1,31 @@
+import base64
 import logging
 import os
-import re
-import sqlite3
 from pathlib import Path
-from typing import Optional
-import base64
 
 with open("agent_photo.jpg", "rb") as f:
     AGENT_PHOTO = base64.b64encode(f.read()).decode()
 
-import faiss
-import numpy as np
 import streamlit as st
-from groq import Groq
-from sentence_transformers import SentenceTransformer
 import streamlit.components.v1 as components
 
-logging.basicConfig(level=logging.INFO)
-log = logging.getLogger("reem")
+from core import (
+    build_index,
+    detect_lang,
+    get_index_stats,
+    process_query,
+    DB_PATH,
+    GROQ_API_KEY,
+)
 
-GROQ_API_KEY = os.environ.get("GROQ_API_KEY", "")
+logging.basicConfig(level=logging.INFO)
+log = logging.getLogger("reem.app")
+
 DEEPGRAM_API_KEY = os.environ.get("DEEPGRAM_API_KEY", "")
 PORT = int(os.environ.get("PORT", 8080))
 
-EMBED_MODEL = "all-MiniLM-L6-v2"
-FAISS_INDEX_PATH = "/tmp/faiss.index"
-CHUNKS_PATH = "/tmp/chunks.npy"
-DB_PATH = Path(__file__).parent / "saudi_orders_database.db"
-TOP_K = 3
-
-DB_SCHEMA = """Table: orders
-Columns:
-order_id INTEGER (primary key)
-order_date TEXT
-customer_name TEXT
-customer_city TEXT
-customer_address TEXT
-status TEXT (Delivered / In Transit / Pending)
-delivery_date TEXT
-comments TEXT"""
-
-_embedder: Optional[SentenceTransformer] = None
-_faiss_index = None
-_chunks: Optional[np.ndarray] = None
-
-def get_embedder():
-    global _embedder
-    if _embedder is None:
-        _embedder = SentenceTransformer(EMBED_MODEL)
-    return _embedder
-
-def try_load_index():
-    global _faiss_index, _chunks
-    if Path(FAISS_INDEX_PATH).exists() and Path(CHUNKS_PATH).exists():
-        _faiss_index = faiss.read_index(FAISS_INDEX_PATH)
-        _chunks = np.load(CHUNKS_PATH, allow_pickle=True)
-        log.info(f"FAISS loaded: {len(_chunks)} chunks")
-
-def build_index(texts: list[str]):
-    global _faiss_index, _chunks
-    embedder = get_embedder()
-    raw_chunks = []
-    for text in texts:
-        for i in range(0, max(1, len(text) - 50), 450):
-            raw_chunks.append(text[i:i + 500].strip())
-    raw_chunks = [c for c in raw_chunks if c]
-    embeddings = embedder.encode(raw_chunks, convert_to_numpy=True).astype(np.float32)
-    faiss.normalize_L2(embeddings)
-    index = faiss.IndexFlatIP(embeddings.shape[1])
-    index.add(embeddings)
-    faiss.write_index(index, FAISS_INDEX_PATH)
-    np.save(CHUNKS_PATH, np.array(raw_chunks, dtype=object))
-    _faiss_index = index
-    _chunks = np.array(raw_chunks, dtype=object)
-    log.info(f"Index built: {len(raw_chunks)} chunks")
-
-try_load_index()
-groq_client = Groq(api_key=GROQ_API_KEY) if GROQ_API_KEY else None
-
-LANG_KEYWORDS = {
-    "en": ["english", "inglés"],
-    "ar": ["arabic", "عربي", "عربية", "العربية"],
-}
-NO_ORDER = {
-    "en": "Please provide your order ID so I can track it for you.",
-    "ar": "يرجى تزويدي برقم الطلب حتى أتمكن من تتبعه.",
-}
-NOT_FOUND = {
-    "en": "I couldn't find an order with that ID. Please check and try again.",
-    "ar": "لم أجد طلباً بهذا الرقم. يرجى التحقق والمحاولة مرة أخرى.",
-}
-
-def detect_lang(text: str) -> Optional[str]:
-    t = text.lower()
-    for code, kws in LANG_KEYWORDS.items():
-        if any(k in t for k in kws):
-            return code
-    return None
-
-def route(query: str) -> str:
-    if not groq_client:
-        return "rag"
-    try:
-        r = groq_client.chat.completions.create(
-            model="llama-3.3-70b-versatile", temperature=0, max_tokens=5,
-            messages=[{"role": "user", "content": f"Reply with ONE word only — 'sql' or 'rag'.\nQuery: {query}"}],
-        )
-        return r.choices[0].message.content.strip().lower()
-    except Exception:
-        return "rag"
-
-def retrieve(query: str):
-    if _faiss_index is None or _chunks is None:
-        return []
-    embedder = get_embedder()
-    q = embedder.encode([query], convert_to_numpy=True).astype(np.float32)
-    faiss.normalize_L2(q)
-    _, ids = _faiss_index.search(q, TOP_K)
-    return [_chunks[i] for i in ids[0] if i >= 0]
-
-def generate_sql(query: str) -> str:
-    if not groq_client:
-        return "SELECT * FROM orders LIMIT 1"
-    try:
-        r = groq_client.chat.completions.create(
-            model="llama-3.3-70b-versatile", temperature=0, max_tokens=150,
-            messages=[{"role": "user", "content": f"Schema:\n{DB_SCHEMA}\nReturn ONLY raw SELECT SQL.\nQuery: {query}"}],
-        )
-        return re.sub(r"```.*```", "", r.choices[0].message.content.strip(), flags=re.DOTALL).strip()
-    except Exception:
-        return "SELECT * FROM orders LIMIT 1"
-
-def run_sql(sql: str):
-    if not DB_PATH.exists():
-        return None, f"Database not found at {DB_PATH}"
-    try:
-        conn = sqlite3.connect(str(DB_PATH))
-        cur = conn.cursor()
-        cur.execute(sql)
-        rows = cur.fetchall()
-        cols = [d[0] for d in cur.description] if cur.description else []
-        conn.close()
-        return (cols, rows), None
-    except Exception as e:
-        return None, str(e)
-
-# ── Core query processor ───────────────────────────────────────────────────────
-# `lang` is now an explicit parameter so server.py (voice path) can call this
-# directly without touching st.session_state.  The Streamlit chat path passes
-# st.session_state.lang; the voice path passes its own session lang.
-def process_query(query: str, lang: str = "en") -> str:
-    """
-    Route the query through sql or rag, run the appropriate pipeline,
-    and return a plain-text answer.
-
-    Args:
-        query: The user's question or utterance.
-        lang:  'en' or 'ar'.  Caller is responsible for detection/tracking.
-    """
-    if not query.strip():
-        return "Please ask a question."
-
-    intent = route(query)
-
-    if intent == "sql":
-        match = re.search(r"\b\d{3,}\b", query)
-        if not match:
-            return NO_ORDER[lang]
-        sql = generate_sql(query)
-        result, err = run_sql(sql)
-        if err or not result or not result[1]:
-            return NOT_FOUND[lang]
-        cols, rows = result
-        try:
-            r = groq_client.chat.completions.create(
-                model="llama-3.3-70b-versatile", temperature=0.1, max_tokens=180,
-                messages=[{"role": "user", "content":
-                    f"You are Reem. Answer in {lang} in ≤3 friendly sentences.\nResult: {rows}"}],
-            )
-            return r.choices[0].message.content.strip()
-        except Exception:
-            return f"Found {len(rows)} orders."
-
-    else:  # rag
-        ctx = retrieve(query)
-        context = "\n\n".join(ctx[:2])[:2800] if ctx else ""
-        system = "You are Reem, a professional call-centre agent for XYZ Holdings. Be concise, polite and friendly."
-        user = (f"Context:\n{context}\n\nQuestion: {query}" if context else f"Question: {query}")
-        try:
-            r = groq_client.chat.completions.create(
-                model="llama-3.3-70b-versatile", temperature=0.1, max_tokens=200,
-                messages=[
-                    {"role": "system", "content": system},
-                    {"role": "user", "content": user},
-                ],
-            )
-            return r.choices[0].message.content.strip()
-        except Exception as e:
-            log.error(f"LLM error: {e}")
-            return "I'm having trouble processing that. Please try again."
-
 # ── Streamlit-specific wrapper (handles lang detection + session state) ────────
 def process_query_streamlit(query: str) -> str:
-    """Thin wrapper used by the Streamlit chat UI only."""
     if not query.strip():
         return "Please ask a question."
     if not st.session_state.lang_set:
@@ -341,7 +164,6 @@ function connectWebSocket() {{
     ws.onmessage = function(event) {{
         try {{
             const data = JSON.parse(event.data);
-
             if (data.type === 'transcript' && !data.is_final && data.text) {{
                 if (isSpeaking && currentAudio) {{
                     currentAudio.pause();
@@ -356,21 +178,17 @@ function connectWebSocket() {{
                 }}
                 setStatus('💭 ' + data.text, '#ff9800');
             }}
-
             if (data.type === 'transcript' && data.is_final && data.text) {{
                 setStatus('📝 You: ' + data.text, '#2196f3');
             }}
-
             if (data.type === 'response') {{
                 setStatus('🤖 ' + data.text, '#9c27b0');
             }}
-
             if (data.type === 'audio_response') {{
                 setStatus('🔊 Speaking...', '#7c4dff');
                 setAvatar('speaking');
                 playAudio(data.audio);
             }}
-
         }} catch(e) {{
             console.error('Message parse error:', e);
         }}
@@ -392,29 +210,20 @@ function setStatus(text, color) {{
 
 function setAvatar(state) {{
     const el = document.getElementById('avatar');
-    if (el) {{
-        el.className = 'avatar' + (state ? ' ' + state : '');
-    }}
+    if (el) {{ el.className = 'avatar' + (state ? ' ' + state : ''); }}
 }}
 
 function playAudio(base64Audio) {{
     try {{
-        if (currentAudio) {{
-            currentAudio.pause();
-            currentAudio = null;
-        }}
-
+        if (currentAudio) {{ currentAudio.pause(); currentAudio = null; }}
         isSpeaking = true;
         const binary = atob(base64Audio);
         const bytes = new Uint8Array(binary.length);
-        for (let i = 0; i < binary.length; i++) {{
-            bytes[i] = binary.charCodeAt(i);
-        }}
+        for (let i = 0; i < binary.length; i++) {{ bytes[i] = binary.charCodeAt(i); }}
         const blob = new Blob([bytes], {{ type: 'audio/mp3' }});
         const url = URL.createObjectURL(blob);
         const audio = new Audio(url);
         currentAudio = audio;
-
         audio.onended = function() {{
             URL.revokeObjectURL(url);
             if (currentAudio === audio) currentAudio = null;
@@ -441,11 +250,7 @@ function playAudio(base64Audio) {{
 }}
 
 async function toggleListening() {{
-    if (isListening) {{
-        stopListening();
-    }} else {{
-        await startListening();
-    }}
+    if (isListening) {{ stopListening(); }} else {{ await startListening(); }}
 }}
 
 async function startListening() {{
@@ -453,30 +258,19 @@ async function startListening() {{
     try {{
         setStatus('🎤 Requesting mic...', '#ff9800');
         mediaStream = await navigator.mediaDevices.getUserMedia({{
-            audio: {{
-                sampleRate: 16000,
-                channelCount: 1,
-                echoCancellation: true,
-                noiseSuppression: true,
-                autoGainControl: true
-            }}
+            audio: {{ sampleRate: 16000, channelCount: 1, echoCancellation: true,
+                      noiseSuppression: true, autoGainControl: true }}
         }});
-
         audioContext = new (window.AudioContext || window.webkitAudioContext)({{ sampleRate: 16000 }});
         await audioContext.resume();
-
         source = audioContext.createMediaStreamSource(mediaStream);
         processor = audioContext.createScriptProcessor(2048, 1, 1);
-
         processor.onaudioprocess = function(e) {{
             if (!isListening || !ws || ws.readyState !== WebSocket.OPEN) return;
-
             const inputData = e.inputBuffer.getChannelData(0);
             let sum = 0;
             for (let i = 0; i < inputData.length; i++) sum += inputData[i] * inputData[i];
-            const rms = Math.sqrt(sum / inputData.length);
-            if (rms < 0.0001) return;
-
+            if (Math.sqrt(sum / inputData.length) < 0.0001) return;
             const pcm = new Int16Array(inputData.length);
             for (let i = 0; i < inputData.length; i++) {{
                 pcm[i] = Math.round(Math.max(-1, Math.min(1, inputData[i])) * 32767);
@@ -488,20 +282,16 @@ async function startListening() {{
             }}
             ws.send(JSON.stringify({{ type: 'audio', data: btoa(binary) }}));
         }};
-
         source.connect(processor);
         processor.connect(audioContext.destination);
-
         if (ws && ws.readyState === WebSocket.OPEN) {{
             ws.send(JSON.stringify({{ type: 'start', lang: currentLang }}));
         }}
-
         isListening = true;
         document.getElementById('micBtn').textContent = '⏹️ Stop';
         document.getElementById('micBtn').style.background = 'linear-gradient(135deg, #f44336, #e91e63)';
         setAvatar('listening');
         setStatus('🎤 Listening... Speak now', '#4caf50');
-
     }} catch(err) {{
         setStatus('❌ ' + err.message, '#f44336');
         alert('Microphone error: ' + err.message);
@@ -509,8 +299,7 @@ async function startListening() {{
 }}
 
 function stopListening() {{
-    isListening = false;
-    isSpeaking = false;
+    isListening = false; isSpeaking = false;
     if (currentAudio) {{ currentAudio.pause(); currentAudio = null; }}
     if (processor) {{ processor.disconnect(); processor = null; }}
     if (source) {{ source.disconnect(); source = null; }}
@@ -530,19 +319,13 @@ connectWebSocket();
 
 <div style="display:flex; flex-direction:column; align-items:center; gap:15px; padding:10px;">
     <button id="micBtn" onclick="toggleListening()" style="
-        padding: 16px 48px;
-        border-radius: 50px;
-        border: none;
-        cursor: pointer;
-        font-size: 18px;
-        font-weight: 500;
-        color: white;
+        padding: 16px 48px; border-radius: 50px; border: none; cursor: pointer;
+        font-size: 18px; font-weight: 500; color: white;
         background: linear-gradient(135deg, #4fc3f7, #7c4dff);
-        transition: all 0.3s;
-        box-shadow: 0 4px 15px rgba(79, 195, 247, 0.3);
-        width: 200px;
+        transition: all 0.3s; box-shadow: 0 4px 15px rgba(79,195,247,0.3); width: 200px;
     ">🎙 Start</button>
-    <div id="status" style="color:#888; font-size:14px; min-height:24px; text-align:center; max-width:300px; word-wrap:break-word;">🔄 Connecting...</div>
+    <div id="status" style="color:#888; font-size:14px; min-height:24px; text-align:center;
+        max-width:300px; word-wrap:break-word;">🔄 Connecting...</div>
 </div>
 """
 
@@ -552,7 +335,6 @@ st.divider()
 if prompt := st.chat_input("Or type your question here..."):
     st.session_state.messages.append({"role": "user", "content": prompt})
     with st.spinner("🤔 Thinking..."):
-        # Use the Streamlit wrapper so lang detection updates session state
         response = process_query_streamlit(prompt)
         st.session_state.messages.append({"role": "assistant", "content": response})
     st.rerun()
@@ -566,8 +348,7 @@ with col2:
 with st.expander("📚 Knowledge Base"):
     st.caption("Upload text files to build a custom knowledge base for RAG")
     uploaded_files = st.file_uploader(
-        "Choose .txt files", type=["txt"],
-        accept_multiple_files=True, key="kb_upload"
+        "Choose .txt files", type=["txt"], accept_multiple_files=True, key="kb_upload"
     )
     if uploaded_files and st.button("Build Knowledge Base", use_container_width=True):
         with st.spinner("Building index..."):
@@ -580,13 +361,14 @@ with st.expander("📚 Knowledge Base"):
                 st.error(f"Error building index: {e}")
 
 with st.expander("ℹ️ Debug Info"):
+    stats = get_index_stats()
     st.json({
         "lang": st.session_state.lang,
         "lang_set": st.session_state.lang_set,
         "messages_count": len(st.session_state.messages),
         "db_exists": str(DB_PATH.exists()),
-        "faiss_loaded": _faiss_index is not None,
-        "chunks_loaded": int(len(_chunks)) if _chunks is not None else 0,
+        "faiss_loaded": stats["faiss_loaded"],
+        "chunks_loaded": stats["chunks_loaded"],
         "groq_key": "✅" if GROQ_API_KEY else "❌",
         "deepgram_key": "✅" if DEEPGRAM_API_KEY else "❌",
         "ws_url": ws_url,
