@@ -4,3 +4,6 @@ dockerfilePath = "Dockerfile"
 
 [deploy]
 startCommand = "python server.py"
+healthcheckPath = "/_stcore/health"
+healthcheckTimeout = 120
+restartPolicyType = "never"
