@@ -156,17 +156,20 @@ def run_sql(sql: str):
 def process_query(query: str, lang: str = "en") -> str:
     """
     Route the query through sql or rag and return a plain-text answer.
-
     Args:
         query: The user's question or utterance.
         lang:  'en' or 'ar'. Caller is responsible for detection/tracking.
-
     Safe to call from any thread. Used by both app.py and server.py.
     """
     if not query.strip():
         return "Please ask a question."
 
+    # Re-check disk on every call so voice path picks up newly built indexes
+    try_load_index()
+    log.info(f"FAISS status: loaded={_faiss_index is not None}, chunks={len(_chunks) if _chunks is not None else 0}")
+
     intent = route(query)
+    log.info(f"Route decision: {intent}")
 
     if intent == "sql":
         match = re.search(r"\b\d{3,}\b", query)
@@ -186,10 +189,10 @@ def process_query(query: str, lang: str = "en") -> str:
             return r.choices[0].message.content.strip()
         except Exception:
             return f"Found {len(rows)} orders."
-
     else:  # rag
         ctx = retrieve(query)
         context = "\n\n".join(ctx[:2])[:2800] if ctx else ""
+        log.info(f"RAG context length: {len(context)} chars")
         system = ("You are Reem, a professional call-centre agent for XYZ Holdings. "
                   "Be concise, polite and friendly.")
         user = (f"Context:\n{context}\n\nQuestion: {query}" if context
