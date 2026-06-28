@@ -91,6 +91,13 @@ NOT_FOUND = {
     "ar": "لم أجد طلباً بهذا الرقم. يرجى التحقق والمحاولة مرة أخرى.",
 }
 
+def detect_lang(text: str) -> Optional[str]:
+    t = text.lower()
+    for code, kws in LANG_KEYWORDS.items():
+        if any(k in t for k in kws):
+            return code
+    return None
+
 def route(query: str) -> str:
     if not groq_client:
         return "rag"
@@ -138,41 +145,44 @@ def run_sql(sql: str):
     except Exception as e:
         return None, str(e)
 
-def detect_lang(text: str):
-    t = text.lower()
-    for code, kws in LANG_KEYWORDS.items():
-        if any(k in t for k in kws):
-            return code
-    return None
+# ── Core query processor ───────────────────────────────────────────────────────
+# `lang` is now an explicit parameter so server.py (voice path) can call this
+# directly without touching st.session_state.  The Streamlit chat path passes
+# st.session_state.lang; the voice path passes its own session lang.
+def process_query(query: str, lang: str = "en") -> str:
+    """
+    Route the query through sql or rag, run the appropriate pipeline,
+    and return a plain-text answer.
 
-def process_query(query: str) -> str:
+    Args:
+        query: The user's question or utterance.
+        lang:  'en' or 'ar'.  Caller is responsible for detection/tracking.
+    """
     if not query.strip():
         return "Please ask a question."
-    if not st.session_state.lang_set:
-        lang = detect_lang(query)
-        if lang:
-            st.session_state.lang = lang
-            st.session_state.lang_set = True
+
     intent = route(query)
+
     if intent == "sql":
         match = re.search(r"\b\d{3,}\b", query)
         if not match:
-            return NO_ORDER[st.session_state.lang]
+            return NO_ORDER[lang]
         sql = generate_sql(query)
         result, err = run_sql(sql)
         if err or not result or not result[1]:
-            return NOT_FOUND[st.session_state.lang]
+            return NOT_FOUND[lang]
         cols, rows = result
         try:
             r = groq_client.chat.completions.create(
                 model="llama-3.3-70b-versatile", temperature=0.1, max_tokens=180,
                 messages=[{"role": "user", "content":
-                    f"You are Reem. Answer in {st.session_state.lang} in ≤3 friendly sentences.\nResult: {rows}"}],
+                    f"You are Reem. Answer in {lang} in ≤3 friendly sentences.\nResult: {rows}"}],
             )
             return r.choices[0].message.content.strip()
         except Exception:
             return f"Found {len(rows)} orders."
-    else:
+
+    else:  # rag
         ctx = retrieve(query)
         context = "\n\n".join(ctx[:2])[:2800] if ctx else ""
         system = "You are Reem, a professional call-centre agent for XYZ Holdings. Be concise, polite and friendly."
@@ -189,6 +199,19 @@ def process_query(query: str) -> str:
         except Exception as e:
             log.error(f"LLM error: {e}")
             return "I'm having trouble processing that. Please try again."
+
+# ── Streamlit-specific wrapper (handles lang detection + session state) ────────
+def process_query_streamlit(query: str) -> str:
+    """Thin wrapper used by the Streamlit chat UI only."""
+    if not query.strip():
+        return "Please ask a question."
+    if not st.session_state.lang_set:
+        detected = detect_lang(query)
+        if detected:
+            st.session_state.lang = detected
+            st.session_state.lang_set = True
+    return process_query(query, lang=st.session_state.lang)
+
 
 # ── Streamlit UI ──────────────────────────────────────────────────────────────
 st.set_page_config(
@@ -298,18 +321,18 @@ audio_html = f"""
 <script>
 const WS_URL = '{ws_url}';
 let ws = null;
-let wsConnected = false;          // ← singleton guard
+let wsConnected = false;
 let isListening = false;
-let isSpeaking = false;           // ← barge-in gate flag
+let isSpeaking = false;
 let audioContext = null;
 let mediaStream = null;
 let source = null;
 let processor = null;
 let currentLang = '{st.session_state.lang}';
-let currentAudio = null;          // ← track playing audio element
+let currentAudio = null;
 
 function connectWebSocket() {{
-    if (wsConnected) return;      // ← prevent duplicate connections
+    if (wsConnected) return;
     ws = new WebSocket(WS_URL);
     ws.onopen = function() {{
         wsConnected = true;
@@ -320,7 +343,6 @@ function connectWebSocket() {{
             const data = JSON.parse(event.data);
 
             if (data.type === 'transcript' && !data.is_final && data.text) {{
-                // ── BARGE-IN: user spoke while agent talking ──────────────
                 if (isSpeaking && currentAudio) {{
                     currentAudio.pause();
                     currentAudio.currentTime = 0;
@@ -328,7 +350,6 @@ function connectWebSocket() {{
                     isSpeaking = false;
                     setAvatar('listening');
                     setStatus('🎤 Listening... Speak now', '#4caf50');
-                    // Tell server TTS was interrupted so it can reset state
                     if (ws && ws.readyState === WebSocket.OPEN) {{
                         ws.send(JSON.stringify({{ type: 'barge_in' }}));
                     }}
@@ -378,7 +399,6 @@ function setAvatar(state) {{
 
 function playAudio(base64Audio) {{
     try {{
-        // Stop any currently playing audio before starting new one
         if (currentAudio) {{
             currentAudio.pause();
             currentAudio = null;
@@ -393,7 +413,7 @@ function playAudio(base64Audio) {{
         const blob = new Blob([bytes], {{ type: 'audio/mp3' }});
         const url = URL.createObjectURL(blob);
         const audio = new Audio(url);
-        currentAudio = audio;   // ← track it for barge-in cancellation
+        currentAudio = audio;
 
         audio.onended = function() {{
             URL.revokeObjectURL(url);
@@ -402,7 +422,6 @@ function playAudio(base64Audio) {{
             if (isListening) {{
                 setAvatar('listening');
                 setStatus('🎤 Listening... Speak now', '#4caf50');
-                // Signal server that TTS finished so it's ready for next utterance
                 if (ws && ws.readyState === WebSocket.OPEN) {{
                     ws.send(JSON.stringify({{ type: 'tts_done' }}));
                 }}
@@ -451,13 +470,6 @@ async function startListening() {{
 
         processor.onaudioprocess = function(e) {{
             if (!isListening || !ws || ws.readyState !== WebSocket.OPEN) return;
-
-            // ── BARGE-IN GATE: suppress mic audio to Deepgram while agent speaks ──
-            // We still allow data through so Deepgram can detect voice activity,
-            // but we do NOT block interim transcripts (handled in onmessage above).
-            // Remove the next two lines if you want true full barge-in:
-            // (keeping them means the agent finishes current sentence before responding)
-            // if (isSpeaking) return;
 
             const inputData = e.inputBuffer.getChannelData(0);
             let sum = 0;
@@ -540,7 +552,8 @@ st.divider()
 if prompt := st.chat_input("Or type your question here..."):
     st.session_state.messages.append({"role": "user", "content": prompt})
     with st.spinner("🤔 Thinking..."):
-        response = process_query(prompt)
+        # Use the Streamlit wrapper so lang detection updates session state
+        response = process_query_streamlit(prompt)
         st.session_state.messages.append({"role": "assistant", "content": response})
     st.rerun()
 
@@ -572,6 +585,8 @@ with st.expander("ℹ️ Debug Info"):
         "lang_set": st.session_state.lang_set,
         "messages_count": len(st.session_state.messages),
         "db_exists": str(DB_PATH.exists()),
+        "faiss_loaded": _faiss_index is not None,
+        "chunks_loaded": int(len(_chunks)) if _chunks is not None else 0,
         "groq_key": "✅" if GROQ_API_KEY else "❌",
         "deepgram_key": "✅" if DEEPGRAM_API_KEY else "❌",
         "ws_url": ws_url,
