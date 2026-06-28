@@ -360,6 +360,26 @@ with st.expander("📚 Knowledge Base"):
             except Exception as e:
                 st.error(f"Error building index: {e}")
 
+with st.expander("🗄️ Orders Database"):
+    st.caption("Upload your SQLite orders database (.db file)")
+    db_status_col, db_upload_col = st.columns([1, 2])
+    with db_status_col:
+        if DB_PATH.exists():
+            st.success("✅ DB loaded")
+            size_kb = DB_PATH.stat().st_size // 1024
+            st.caption(f"{size_kb} KB")
+        else:
+            st.error("❌ No DB found")
+    with db_upload_col:
+        uploaded_db = st.file_uploader(
+            "Replace database", type=["db"], key="db_upload"
+        )
+        if uploaded_db:
+            with open(DB_PATH, "wb") as f:
+                f.write(uploaded_db.getbuffer())
+            st.success("✅ Database uploaded!")
+            st.rerun()
+
 with st.expander("ℹ️ Debug Info"):
     stats = get_index_stats()
     st.json({
