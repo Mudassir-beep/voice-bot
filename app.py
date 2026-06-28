@@ -55,53 +55,186 @@ if "is_listening" not in st.session_state:
 
 st.markdown("""
 <style>
+    @import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap');
+
+    /* ── Global ── */
+    html, body, [class*="css"] {
+        font-family: 'Inter', sans-serif;
+    }
+    .stApp {
+        background: linear-gradient(135deg, #0f0f1a 0%, #1a1a2e 50%, #16213e 100%);
+        min-height: 100vh;
+    }
+
+    /* ── Hide default Streamlit chrome ── */
+    #MainMenu, footer, header { visibility: hidden; }
+    .block-container {
+        padding-top: 2rem;
+        max-width: 720px;
+    }
+
+    /* ── Hero card ── */
+    .hero-card {
+        background: rgba(255,255,255,0.04);
+        border: 1px solid rgba(255,255,255,0.08);
+        border-radius: 24px;
+        padding: 2rem 1.5rem 1.5rem;
+        text-align: center;
+        backdrop-filter: blur(12px);
+        margin-bottom: 1.5rem;
+    }
+    .agent-name {
+        font-size: 2rem;
+        font-weight: 700;
+        background: linear-gradient(135deg, #4fc3f7, #7c4dff);
+        -webkit-background-clip: text;
+        -webkit-text-fill-color: transparent;
+        margin: 0.5rem 0 0.2rem;
+    }
+    .agent-subtitle {
+        color: rgba(255,255,255,0.4);
+        font-size: 0.85rem;
+        letter-spacing: 0.08em;
+        text-transform: uppercase;
+        margin-bottom: 1.2rem;
+    }
+
+    /* ── Avatar ── */
     .avatar {
-        width: 120px;
-        height: 120px;
+        width: 110px;
+        height: 110px;
         border-radius: 50%;
-        margin: 0 auto 10px auto;
+        margin: 0 auto 0.8rem;
         display: flex;
         align-items: center;
         justify-content: center;
         background: linear-gradient(135deg, #4fc3f7, #7c4dff);
-        font-size: 56px;
-        transition: all 0.3s;
+        transition: all 0.3s ease;
+        border: 3px solid rgba(79,195,247,0.3);
     }
     .avatar.listening {
-        animation: pulse-ring 1s infinite;
-        box-shadow: 0 0 30px rgba(79, 195, 247, 0.5);
+        animation: pulse-ring 1.2s ease-out infinite;
+        border-color: #4fc3f7;
+        box-shadow: 0 0 0 0 rgba(79,195,247,0.4);
     }
     .avatar.speaking {
-        animation: pulse-speak 0.5s infinite;
-        box-shadow: 0 0 30px rgba(124, 77, 255, 0.6);
+        animation: pulse-speak 0.8s ease-in-out infinite;
+        border-color: #7c4dff;
         background: linear-gradient(135deg, #7c4dff, #e91e63);
     }
     @keyframes pulse-ring {
-        0% { box-shadow: 0 0 0 0 rgba(79, 195, 247, 0.4); }
-        70% { box-shadow: 0 0 0 20px rgba(79, 195, 247, 0); }
-        100% { box-shadow: 0 0 0 0 rgba(79, 195, 247, 0); }
+        0%   { box-shadow: 0 0 0 0 rgba(79,195,247,0.5); }
+        70%  { box-shadow: 0 0 0 22px rgba(79,195,247,0); }
+        100% { box-shadow: 0 0 0 0 rgba(79,195,247,0); }
     }
     @keyframes pulse-speak {
-        0% { box-shadow: 0 0 0 0 rgba(124, 77, 255, 0.6); }
-        70% { box-shadow: 0 0 0 20px rgba(124, 77, 255, 0); }
-        100% { box-shadow: 0 0 0 0 rgba(124, 77, 255, 0); }
+        0%,100% { box-shadow: 0 0 20px rgba(124,77,255,0.4); }
+        50%     { box-shadow: 0 0 40px rgba(124,77,255,0.8); }
+    }
+
+    /* ── Lang pills ── */
+    .lang-row {
+        display: flex;
+        gap: 10px;
+        justify-content: center;
+        margin-bottom: 0.5rem;
+    }
+
+    /* ── Streamlit button overrides ── */
+    .stButton > button {
+        border-radius: 50px !important;
+        font-weight: 500 !important;
+        border: 1px solid rgba(255,255,255,0.12) !important;
+        transition: all 0.2s ease !important;
+        font-family: 'Inter', sans-serif !important;
+    }
+    .stButton > button:hover {
+        transform: translateY(-1px) !important;
+        box-shadow: 0 4px 20px rgba(79,195,247,0.25) !important;
+    }
+    .stButton > button[kind="primary"] {
+        background: linear-gradient(135deg, #4fc3f7, #7c4dff) !important;
+        border: none !important;
+        color: white !important;
+    }
+    .stButton > button[kind="secondary"] {
+        background: rgba(255,255,255,0.06) !important;
+        color: rgba(255,255,255,0.7) !important;
+    }
+
+    /* ── Chat messages ── */
+    .stChatMessage {
+        background: rgba(255,255,255,0.04) !important;
+        border: 1px solid rgba(255,255,255,0.07) !important;
+        border-radius: 16px !important;
+        margin-bottom: 0.75rem !important;
+        backdrop-filter: blur(8px) !important;
+    }
+    .stChatMessage p { color: rgba(255,255,255,0.88) !important; }
+
+    /* ── Chat input ── */
+    .stChatInput > div {
+        background: rgba(255,255,255,0.06) !important;
+        border: 1px solid rgba(255,255,255,0.12) !important;
+        border-radius: 50px !important;
+        backdrop-filter: blur(8px) !important;
+    }
+    .stChatInput textarea {
+        color: white !important;
+        font-family: 'Inter', sans-serif !important;
+    }
+
+    /* ── Expanders ── */
+    .streamlit-expanderHeader {
+        background: rgba(255,255,255,0.04) !important;
+        border: 1px solid rgba(255,255,255,0.08) !important;
+        border-radius: 12px !important;
+        color: rgba(255,255,255,0.75) !important;
+        font-weight: 500 !important;
+    }
+    .streamlit-expanderContent {
+        background: rgba(255,255,255,0.02) !important;
+        border: 1px solid rgba(255,255,255,0.06) !important;
+        border-top: none !important;
+        border-radius: 0 0 12px 12px !important;
+    }
+
+    /* ── Divider ── */
+    hr {
+        border-color: rgba(255,255,255,0.08) !important;
+        margin: 1rem 0 !important;
+    }
+
+    /* ── Metrics / captions ── */
+    .stCaption { color: rgba(255,255,255,0.4) !important; }
+
+    /* ── File uploader ── */
+    .stFileUploader {
+        background: rgba(255,255,255,0.03) !important;
+        border: 1px dashed rgba(255,255,255,0.15) !important;
+        border-radius: 12px !important;
+    }
+
+    /* ── Scrollbar ── */
+    ::-webkit-scrollbar { width: 4px; }
+    ::-webkit-scrollbar-track { background: transparent; }
+    ::-webkit-scrollbar-thumb {
+        background: rgba(79,195,247,0.3);
+        border-radius: 4px;
     }
 </style>
 """, unsafe_allow_html=True)
 
-col1, col2, col3 = st.columns([1, 1, 1])
-with col2:
-    st.markdown(
-    f'''
+st.markdown(f"""
+<div class="hero-card">
     <div class="avatar" id="main-avatar">
-        <img src="data:image/jpeg;base64,{AGENT_PHOTO}" style="width:100%;height:100%;border-radius:50%;object-fit:cover;">
+        <img src="data:image/jpeg;base64,{AGENT_PHOTO}"
+             style="width:100%;height:100%;border-radius:50%;object-fit:cover;">
     </div>
-    ''',
-    unsafe_allow_html=True
-)
-    st.title("Reem")
-    st.caption("XYZ Holdings - Voice Agent")
-st.divider()
+    <div class="agent-name">Reem</div>
+    <div class="agent-subtitle">XYZ Holdings &nbsp;·&nbsp; AI Voice Agent</div>
+</div>
+""", unsafe_allow_html=True)
 
 lang_col1, lang_col2 = st.columns(2)
 with lang_col1:
@@ -288,8 +421,9 @@ async function startListening() {{
             ws.send(JSON.stringify({{ type: 'start', lang: currentLang }}));
         }}
         isListening = true;
-        document.getElementById('micBtn').textContent = '⏹️ Stop';
+        document.getElementById('micBtn').innerHTML = '⏹&nbsp; Stop';
         document.getElementById('micBtn').style.background = 'linear-gradient(135deg, #f44336, #e91e63)';
+        document.getElementById('micBtn').style.boxShadow = '0 4px 24px rgba(244,67,54,0.4)';
         setAvatar('listening');
         setStatus('🎤 Listening... Speak now', '#4caf50');
     }} catch(err) {{
@@ -308,8 +442,9 @@ function stopListening() {{
     if (ws && ws.readyState === WebSocket.OPEN) {{
         ws.send(JSON.stringify({{ type: 'stop' }}));
     }}
-    document.getElementById('micBtn').textContent = '🎙 Start';
+    document.getElementById('micBtn').innerHTML = '🎙&nbsp; Start';
     document.getElementById('micBtn').style.background = 'linear-gradient(135deg, #4fc3f7, #7c4dff)';
+    document.getElementById('micBtn').style.boxShadow = '0 4px 24px rgba(79,195,247,0.35)';
     setAvatar('');
     setStatus('⏹️ Stopped', '#888');
 }}
@@ -317,40 +452,62 @@ function stopListening() {{
 connectWebSocket();
 </script>
 
-<div style="display:flex; flex-direction:column; align-items:center; gap:15px; padding:10px;">
+<div style="display:flex; flex-direction:column; align-items:center; gap:16px; padding:8px 0 4px;">
     <button id="micBtn" onclick="toggleListening()" style="
-        padding: 16px 48px; border-radius: 50px; border: none; cursor: pointer;
-        font-size: 18px; font-weight: 500; color: white;
+        width: 180px;
+        padding: 14px 0;
+        border-radius: 50px;
+        border: none;
+        cursor: pointer;
+        font-size: 16px;
+        font-weight: 600;
+        color: white;
+        font-family: 'Inter', sans-serif;
+        letter-spacing: 0.03em;
         background: linear-gradient(135deg, #4fc3f7, #7c4dff);
-        transition: all 0.3s; box-shadow: 0 4px 15px rgba(79,195,247,0.3); width: 200px;
-    ">🎙 Start</button>
-    <div id="status" style="color:#888; font-size:14px; min-height:24px; text-align:center;
-        max-width:300px; word-wrap:break-word;">🔄 Connecting...</div>
+        transition: all 0.25s ease;
+        box-shadow: 0 4px 24px rgba(79,195,247,0.35);
+    " onmouseover="this.style.transform='translateY(-2px)';this.style.boxShadow='0 8px 30px rgba(79,195,247,0.5)'"
+       onmouseout="this.style.transform='';this.style.boxShadow='0 4px 24px rgba(79,195,247,0.35)'">
+        🎙&nbsp; Start
+    </button>
+    <div id="status" style="
+        color: rgba(255,255,255,0.45);
+        font-size: 13px;
+        font-family: 'Inter', sans-serif;
+        min-height: 20px;
+        text-align: center;
+        max-width: 320px;
+        word-wrap: break-word;
+        letter-spacing: 0.01em;
+    ">🔄 Connecting...</div>
 </div>
 """
 
 components.html(audio_html, height=280)
 
 st.divider()
-if prompt := st.chat_input("Or type your question here..."):
+if prompt := st.chat_input("Message Reem..."):
     st.session_state.messages.append({"role": "user", "content": prompt})
-    with st.spinner("🤔 Thinking..."):
+    with st.spinner(""):
         response = process_query_streamlit(prompt)
         st.session_state.messages.append({"role": "assistant", "content": response})
     st.rerun()
 
-col1, col2, col3 = st.columns([1, 1, 1])
-with col2:
-    if st.button("🗑️ Clear Chat", use_container_width=True):
+c1, c2, c3 = st.columns([2, 1, 2])
+with c2:
+    if st.button("🗑️ Clear", use_container_width=True):
         st.session_state.messages = []
         st.rerun()
 
+st.markdown("<br>", unsafe_allow_html=True)
+
 with st.expander("📚 Knowledge Base"):
-    st.caption("Upload text files to build a custom knowledge base for RAG")
+    st.caption("Upload .txt files to build the RAG knowledge base")
     uploaded_files = st.file_uploader(
         "Choose .txt files", type=["txt"], accept_multiple_files=True, key="kb_upload"
     )
-    if uploaded_files and st.button("Build Knowledge Base", use_container_width=True):
+    if uploaded_files and st.button("⚡ Build Index", use_container_width=True):
         with st.spinner("Building index..."):
             try:
                 texts = [f.read().decode("utf-8") for f in uploaded_files]
@@ -358,7 +515,7 @@ with st.expander("📚 Knowledge Base"):
                 st.success(f"✅ Index built with {len(texts)} documents")
                 st.rerun()
             except Exception as e:
-                st.error(f"Error building index: {e}")
+                st.error(f"Error: {e}")
 
 with st.expander("🗄️ Orders Database"):
     st.caption("Upload your SQLite orders database (.db file)")
@@ -377,7 +534,7 @@ with st.expander("🗄️ Orders Database"):
         if uploaded_db:
             with open(DB_PATH, "wb") as f:
                 f.write(uploaded_db.getbuffer())
-            st.success("✅ Database uploaded!")
+            st.success("✅ Uploaded!")
             st.rerun()
 
 with st.expander("ℹ️ Debug Info"):
