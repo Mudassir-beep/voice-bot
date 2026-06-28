@@ -16,7 +16,6 @@ import httpx
 import uvicorn
 import websockets as ws_lib
 from fastapi import FastAPI, Request, Response, WebSocket, WebSocketDisconnect
-from groq import Groq
 
 try:
     import edge_tts
@@ -29,25 +28,21 @@ logging.basicConfig(level=logging.INFO)
 
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
 
-GROQ_API_KEY = os.environ.get("GROQ_API_KEY", "")
 DEEPGRAM_API_KEY = os.environ.get("DEEPGRAM_API_KEY", "")
 PORT = int(os.environ.get("PORT", 8080))
 STREAMLIT_PORT = 8502
 STREAMLIT_URL = f"http://localhost:{STREAMLIT_PORT}"
 
-# ── Import shared logic from app.py ──────────────────────────────────────────
-# Both the voice path (server.py) and the text chat path (app.py) now use the
-# same process_query() and detect_lang() functions, so RAG retrieval, the SQL
-# router, and the SQLite DB are always in the loop — regardless of input mode.
+# ── Import shared logic from core.py ─────────────────────────────────────────
+# core.py has zero Streamlit dependencies so it is safe to import here at
+# module load time — it will NOT trigger st.set_page_config or any UI code.
 sys.path.insert(0, str(Path(__file__).parent))
-from app import process_query as _sync_process_query, detect_lang  # noqa: E402
+from core import process_query as _sync_process_query, detect_lang  # noqa: E402
 
 async def process_query(text: str, lang: str = "en") -> str:
     """
-    Async wrapper around app.py's synchronous process_query.
-
-    Runs the blocking call (FAISS search, SQLite query, Groq API) in a
-    thread-pool executor so it doesn't stall the FastAPI event loop.
+    Async wrapper around core.py's synchronous process_query.
+    Runs in a thread-pool executor so it never blocks the FastAPI event loop.
     """
     loop = asyncio.get_event_loop()
     return await loop.run_in_executor(None, _sync_process_query, text, lang)
@@ -128,7 +123,6 @@ async def deepgram_stream(
     headers = [("Authorization", f"Token {DEEPGRAM_API_KEY}")]
     uri = f"wss://api.deepgram.com/v1/listen?{params}"
 
-    # Per-session lock: only one LLM+TTS pipeline runs at a time
     processing_lock = asyncio.Lock()
 
     try:
@@ -168,7 +162,6 @@ async def deepgram_stream(
                                 })
 
                             if text and is_final:
-                                # Guard: skip if barge_in flagged
                                 if session_state.get("barge_in"):
                                     log.info(f"[{session_id}] Skipping final (barge-in): {text}")
                                     session_state["barge_in"] = False
@@ -176,7 +169,6 @@ async def deepgram_stream(
 
                                 log.info(f"[{session_id}] Final: {text}")
 
-                                # Language detection — updates session, not st.session_state
                                 detected = detect_lang(text)
                                 if detected:
                                     session_state["lang"] = detected
@@ -188,14 +180,12 @@ async def deepgram_stream(
                                     "is_final": True
                                 })
 
-                                # Serialize LLM+TTS so duplicate finals don't stack
                                 async with processing_lock:
                                     if session_state.get("barge_in"):
                                         session_state["barge_in"] = False
                                         continue
 
-                                    # ── This now calls app.py's full pipeline ──
-                                    # route() → sql branch (SQLite) or rag branch (FAISS)
+                                    # Full RAG/SQL pipeline via core.py
                                     response_text = await process_query(text, lang)
                                     log.info(f"[{session_id}] Response: {response_text}")
 
@@ -225,7 +215,6 @@ async def deepgram_stream(
 
 
 async def _cancel_task(task: Optional[asyncio.Task]):
-    """Cancel a task and wait for it to finish cleanly."""
     if task and not task.done():
         task.cancel()
         try:
@@ -252,14 +241,12 @@ async def audio_websocket(websocket: WebSocket):
             if msg_type == "start":
                 session_state["lang"] = data.get("lang", "en")
                 session_state["barge_in"] = False
-
                 await _cancel_task(dg_task)
-
                 audio_q = asyncio.Queue()
                 dg_task = asyncio.create_task(
                     deepgram_stream(session_id, websocket, audio_q, session_state)
                 )
-                log.info(f"[{session_id}] START — new DG session, lang={session_state['lang']}")
+                log.info(f"[{session_id}] START — lang={session_state['lang']}")
 
             elif msg_type == "audio":
                 audio_bytes = base64.b64decode(data.get("data", ""))
