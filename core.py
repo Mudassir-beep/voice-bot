@@ -14,7 +14,7 @@ from typing import Optional
 import faiss
 import numpy as np
 from groq import Groq
-from sentence_transformers import SentenceTransformer
+from fastembed import TextEmbedding
 
 log = logging.getLogger("reem.core")
 
@@ -38,7 +38,7 @@ delivery_date TEXT
 comments TEXT"""
 
 # ── Singletons ────────────────────────────────────────────────────────────────
-_embedder: Optional[SentenceTransformer] = None
+_embedder: Optional[TextEmbedding] = None
 _faiss_index = None
 _chunks: Optional[np.ndarray] = None
 groq_client = Groq(api_key=GROQ_API_KEY) if GROQ_API_KEY else None
@@ -65,10 +65,10 @@ def detect_lang(text: str) -> Optional[str]:
     return None
 
 # ── Embedder / FAISS ──────────────────────────────────────────────────────────
-def get_embedder() -> SentenceTransformer:
+def get_embedder() -> TextEmbedding:
     global _embedder
     if _embedder is None:
-        _embedder = SentenceTransformer(EMBED_MODEL)
+        _embedder = TextEmbedding("BAAI/bge-small-en-v1.5")
     return _embedder
 
 def try_load_index():
@@ -86,7 +86,7 @@ def build_index(texts: list[str]):
         for i in range(0, max(1, len(text) - 50), 450):
             raw_chunks.append(text[i:i + 500].strip())
     raw_chunks = [c for c in raw_chunks if c]
-    embeddings = embedder.encode(raw_chunks, convert_to_numpy=True).astype(np.float32)
+    embeddings = np.array(list(embedder.embed(raw_chunks))).astype(np.float32)
     faiss.normalize_L2(embeddings)
     index = faiss.IndexFlatIP(embeddings.shape[1])
     index.add(embeddings)
@@ -94,7 +94,6 @@ def build_index(texts: list[str]):
     np.save(CHUNKS_PATH, np.array(raw_chunks, dtype=object))
     _faiss_index = index
     _chunks = np.array(raw_chunks, dtype=object)
-    log.info(f"Index built: {len(raw_chunks)} chunks")
 
 def get_index_stats() -> dict:
     return {
@@ -106,7 +105,7 @@ def retrieve(query: str) -> list:
     if _faiss_index is None or _chunks is None:
         return []
     embedder = get_embedder()
-    q = embedder.encode([query], convert_to_numpy=True).astype(np.float32)
+    q = np.array(list(embedder.embed([query]))).astype(np.float32)
     faiss.normalize_L2(q)
     _, ids = _faiss_index.search(q, TOP_K)
     return [_chunks[i] for i in ids[0] if i >= 0]
