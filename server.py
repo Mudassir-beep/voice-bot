@@ -35,43 +35,28 @@ PORT = int(os.environ.get("PORT", 8080))
 STREAMLIT_PORT = 8502
 STREAMLIT_URL = f"http://localhost:{STREAMLIT_PORT}"
 
-groq_client = Groq(api_key=GROQ_API_KEY) if GROQ_API_KEY else None
+# ── Import shared logic from app.py ──────────────────────────────────────────
+# Both the voice path (server.py) and the text chat path (app.py) now use the
+# same process_query() and detect_lang() functions, so RAG retrieval, the SQL
+# router, and the SQLite DB are always in the loop — regardless of input mode.
+sys.path.insert(0, str(Path(__file__).parent))
+from app import process_query as _sync_process_query, detect_lang  # noqa: E402
 
+async def process_query(text: str, lang: str = "en") -> str:
+    """
+    Async wrapper around app.py's synchronous process_query.
+
+    Runs the blocking call (FAISS search, SQLite query, Groq API) in a
+    thread-pool executor so it doesn't stall the FastAPI event loop.
+    """
+    loop = asyncio.get_event_loop()
+    return await loop.run_in_executor(None, _sync_process_query, text, lang)
+
+# ── TTS ───────────────────────────────────────────────────────────────────────
 TTS_VOICES = {
     "en": "en-US-AriaNeural",
     "ar": "ar-SA-ZariyahNeural",
 }
-
-LANG_KEYWORDS = {
-    "en": ["english", "inglés"],
-    "ar": ["arabic", "عربي", "عربية", "العربية"],
-}
-
-def detect_lang(text: str):
-    t = text.lower()
-    for code, kws in LANG_KEYWORDS.items():
-        if any(k in t for k in kws):
-            return code
-    return None
-
-async def process_query(text: str, lang: str = "en") -> str:
-    if not groq_client:
-        return "I'm sorry, I cannot process that right now."
-    try:
-        system = f"You are Reem, a professional call-centre agent for XYZ Holdings. Reply in {lang}. Be concise and friendly. Keep responses under 2 sentences."
-        r = groq_client.chat.completions.create(
-            model="llama-3.3-70b-versatile",
-            temperature=0.1,
-            max_tokens=150,
-            messages=[
-                {"role": "system", "content": system},
-                {"role": "user", "content": text},
-            ],
-        )
-        return r.choices[0].message.content.strip()
-    except Exception as e:
-        log.error(f"Groq error: {e}")
-        return "I'm having trouble processing that. Please try again."
 
 async def text_to_speech(text: str, lang: str = "en") -> Optional[bytes]:
     if not EDGE_TTS_AVAILABLE:
@@ -143,8 +128,7 @@ async def deepgram_stream(
     headers = [("Authorization", f"Token {DEEPGRAM_API_KEY}")]
     uri = f"wss://api.deepgram.com/v1/listen?{params}"
 
-    # ── Per-session lock: only one LLM+TTS pipeline runs at a time ──────────
-    # This prevents double-responses if two finals arrive in quick succession.
+    # Per-session lock: only one LLM+TTS pipeline runs at a time
     processing_lock = asyncio.Lock()
 
     try:
@@ -184,14 +168,15 @@ async def deepgram_stream(
                                 })
 
                             if text and is_final:
-                                # ── Guard: skip if barge_in flagged ─────────
+                                # Guard: skip if barge_in flagged
                                 if session_state.get("barge_in"):
-                                    log.info(f"[{session_id}] Skipping final (barge-in active): {text}")
+                                    log.info(f"[{session_id}] Skipping final (barge-in): {text}")
                                     session_state["barge_in"] = False
                                     continue
 
                                 log.info(f"[{session_id}] Final: {text}")
 
+                                # Language detection — updates session, not st.session_state
                                 detected = detect_lang(text)
                                 if detected:
                                     session_state["lang"] = detected
@@ -203,13 +188,14 @@ async def deepgram_stream(
                                     "is_final": True
                                 })
 
-                                # ── Serialize LLM+TTS so duplicate finals don't stack ──
+                                # Serialize LLM+TTS so duplicate finals don't stack
                                 async with processing_lock:
-                                    # Skip stale finals that arrived while processing
                                     if session_state.get("barge_in"):
                                         session_state["barge_in"] = False
                                         continue
 
+                                    # ── This now calls app.py's full pipeline ──
+                                    # route() → sql branch (SQLite) or rag branch (FAISS)
                                     response_text = await process_query(text, lang)
                                     log.info(f"[{session_id}] Response: {response_text}")
 
@@ -267,10 +253,9 @@ async def audio_websocket(websocket: WebSocket):
                 session_state["lang"] = data.get("lang", "en")
                 session_state["barge_in"] = False
 
-                # Properly cancel old task before starting a new one
                 await _cancel_task(dg_task)
 
-                audio_q = asyncio.Queue()   # fresh queue for new session
+                audio_q = asyncio.Queue()
                 dg_task = asyncio.create_task(
                     deepgram_stream(session_id, websocket, audio_q, session_state)
                 )
@@ -284,12 +269,10 @@ async def audio_websocket(websocket: WebSocket):
                 session_state["lang"] = data.get("lang", "en")
 
             elif msg_type == "barge_in":
-                # Client interrupted playback — flag so server drops next final transcript
                 session_state["barge_in"] = True
                 log.info(f"[{session_id}] Barge-in received")
 
             elif msg_type == "tts_done":
-                # Client finished playing TTS — nothing needed server-side
                 log.info(f"[{session_id}] TTS done acknowledged")
 
             elif msg_type == "stop":
