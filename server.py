@@ -98,6 +98,21 @@ else:
 
 app = FastAPI()
 
+# ── Health check (for Railway — must respond immediately on main PORT) ────────
+@app.get("/_stcore/health")
+async def health():
+    """
+    Railway healthcheck hits /_stcore/health on the main port.
+    FastAPI answers this directly so the container is marked healthy
+    as soon as uvicorn is up — regardless of whether Streamlit has
+    finished booting.
+    """
+    return Response(content="ok", status_code=200)
+
+@app.get("/health")
+async def health_plain():
+    return Response(content="ok", status_code=200)
+
 # ── Twilio routes (Voice Call + WhatsApp) ─────────────────────────────────────
 from twilio_routes import router as twilio_router  # noqa: E402
 app.include_router(twilio_router)
