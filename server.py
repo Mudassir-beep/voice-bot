@@ -34,16 +34,10 @@ STREAMLIT_PORT = 8502
 STREAMLIT_URL = f"http://localhost:{STREAMLIT_PORT}"
 
 # ── Import shared logic from core.py ─────────────────────────────────────────
-# core.py has zero Streamlit dependencies so it is safe to import here at
-# module load time — it will NOT trigger st.set_page_config or any UI code.
 sys.path.insert(0, str(Path(__file__).parent))
 from core import process_query as _sync_process_query, detect_lang  # noqa: E402
 
 async def process_query(text: str, lang: str = "en") -> str:
-    """
-    Async wrapper around core.py's synchronous process_query.
-    Runs in a thread-pool executor so it never blocks the FastAPI event loop.
-    """
     loop = asyncio.get_event_loop()
     return await loop.run_in_executor(None, _sync_process_query, text, lang)
 
@@ -103,6 +97,10 @@ else:
     log.info("Streamlit already running, skipping start.")
 
 app = FastAPI()
+
+# ── Twilio routes (Voice Call + WhatsApp) ─────────────────────────────────────
+from twilio_routes import router as twilio_router  # noqa: E402
+app.include_router(twilio_router)
 
 # ── Deepgram streaming ────────────────────────────────────────────────────────
 async def deepgram_stream(
@@ -185,7 +183,6 @@ async def deepgram_stream(
                                         session_state["barge_in"] = False
                                         continue
 
-                                    # Full RAG/SQL pipeline via core.py
                                     response_text = await process_query(text, lang)
                                     log.info(f"[{session_id}] Response: {response_text}")
 
