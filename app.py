@@ -484,7 +484,7 @@ connectWebSocket();
 </div>
 """
 
-components.html(audio_html, height=280)
+st.html(audio_html)
 
 st.divider()
 if prompt := st.chat_input("Message Reem..."):
