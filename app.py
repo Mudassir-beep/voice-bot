@@ -293,6 +293,13 @@ let source = null;
 let processor = null;
 let currentLang = '{st.session_state.lang}';
 let currentAudio = null;
+let diagChunksCaptured = 0;
+let diagChunksSent = 0;
+let diagMsgsReceived = 0;
+function updateDiag() {{
+    const el = document.getElementById('diag');
+    if (el) el.textContent = 'mic frames: ' + diagChunksCaptured + ' | sent: ' + diagChunksSent + ' | server msgs: ' + diagMsgsReceived;
+}}
 
 function connectWebSocket() {{
     if (wsConnected) return;
@@ -311,6 +318,8 @@ function connectWebSocket() {{
         setStatus('🟢 Connected - click Start', '#4caf50');
     }};
     ws.onmessage = function(event) {{
+        diagMsgsReceived++;
+        updateDiag();
         try {{
             const data = JSON.parse(event.data);
             if (data.type === 'transcript' && !data.is_final && data.text) {{
@@ -420,10 +429,11 @@ async function startListening() {{
         processor = audioContext.createScriptProcessor(2048, 1, 1);
         processor.onaudioprocess = function(e) {{
             if (!isListening || !ws || ws.readyState !== WebSocket.OPEN) return;
+            diagChunksCaptured++;
             const inputData = e.inputBuffer.getChannelData(0);
             let sum = 0;
             for (let i = 0; i < inputData.length; i++) sum += inputData[i] * inputData[i];
-            if (Math.sqrt(sum / inputData.length) < 0.0001) return;
+            if (Math.sqrt(sum / inputData.length) < 0.0001) {{ updateDiag(); return; }}
             const pcm = new Int16Array(inputData.length);
             for (let i = 0; i < inputData.length; i++) {{
                 pcm[i] = Math.round(Math.max(-1, Math.min(1, inputData[i])) * 32767);
@@ -434,6 +444,8 @@ async function startListening() {{
                 binary += String.fromCharCode(...bytes.subarray(i, i + 4096));
             }}
             ws.send(JSON.stringify({{ type: 'audio', data: btoa(binary) }}));
+            diagChunksSent++;
+            updateDiag();
         }};
         source.connect(processor);
         processor.connect(audioContext.destination);
@@ -501,6 +513,14 @@ connectWebSocket();
         word-wrap: break-word;
         letter-spacing: 0.01em;
     ">🔄 Connecting...</div>
+    <div id="diag" style="
+        color: rgba(255,255,255,0.3);
+        font-size: 11px;
+        font-family: monospace;
+        min-height: 16px;
+        text-align: center;
+        margin-top: 4px;
+    "></div>
 </div>
 """
 
