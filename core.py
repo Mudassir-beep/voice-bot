@@ -2,7 +2,7 @@
 core.py — shared RAG/SQL/LLM logic for Reem.
 
 Imported by both app.py (Streamlit UI) and server.py (FastAPI + WebSocket).
-No Streamlit imports  here — this module must be safe to load in any context.
+No Streamlit imports here — this module must be safe to load in any context.
 """
 import logging
 import os
@@ -168,8 +168,13 @@ def process_query(query: str, lang: str = "en") -> str:
     if not query.strip():
         return "Please ask a question."
 
-    # Re-check disk on every call so voice path picks up newly built indexes
-    try_load_index()
+    # Re-check disk on every call so voice path picks up newly built indexes.
+    # Guarded: a missing/partial/corrupt index file must never kill the whole
+    # response — fall back to no-context (SQL path still works either way).
+    try:
+        try_load_index()
+    except Exception as e:
+        log.error(f"try_load_index failed, continuing without RAG context: {e}")
     log.info(f"FAISS status: loaded={_faiss_index is not None}, chunks={len(_chunks) if _chunks is not None else 0}")
 
     intent = route(query)
