@@ -2,7 +2,7 @@
 core.py — shared RAG/SQL/LLM logic for Reem.
 
 Imported by both app.py (Streamlit UI) and server.py (FastAPI + WebSocket).
-No Streamlit imports here — this module must be safe to load in any context.
+No Streamlit imports  here — this module must be safe to load in any context.
 """
 import logging
 import os
