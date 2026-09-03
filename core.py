@@ -20,6 +20,10 @@ log = logging.getLogger("reem.core")
 
 # ── Config ────────────────────────────────────────────────────────────────────
 GROQ_API_KEY = os.environ.get("GROQ_API_KEY", "")
+# llama-3.3-70b-versatile was deprecated by Groq and decommissioned Aug 16, 2026.
+# gpt-oss-120b is Groq's recommended general-purpose replacement.
+# Override via env var if you want to switch models without editing code.
+GROQ_MODEL = os.environ.get("GROQ_MODEL", "openai/gpt-oss-120b")
 EMBED_MODEL = "all-MiniLM-L6-v2"
 FAISS_INDEX_PATH = "/tmp/faiss.index"
 CHUNKS_PATH = "/tmp/chunks.npy"
@@ -116,7 +120,7 @@ def route(query: str) -> str:
         return "rag"
     try:
         r = groq_client.chat.completions.create(
-            model="llama-3.3-70b-versatile", temperature=0, max_tokens=5,
+            model=GROQ_MODEL, temperature=0, max_tokens=5,
             messages=[{"role": "user", "content":
                 f"Reply with ONE word only — 'sql' or 'rag'.\nQuery: {query}"}],
         )
@@ -129,7 +133,7 @@ def generate_sql(query: str) -> str:
         return "SELECT * FROM orders LIMIT 1"
     try:
         r = groq_client.chat.completions.create(
-            model="llama-3.3-70b-versatile", temperature=0, max_tokens=150,
+            model=GROQ_MODEL, temperature=0, max_tokens=150,
             messages=[{"role": "user", "content":
                 f"Schema:\n{DB_SCHEMA}\nReturn ONLY raw SELECT SQL.\nQuery: {query}"}],
         )
@@ -182,7 +186,7 @@ def process_query(query: str, lang: str = "en") -> str:
         cols, rows = result
         try:
             r = groq_client.chat.completions.create(
-                model="llama-3.3-70b-versatile", temperature=0.1, max_tokens=180,
+                model=GROQ_MODEL, temperature=0.1, max_tokens=180,
                 messages=[{"role": "user", "content":
                     f"You are Reem. Answer in {lang} in ≤3 friendly sentences.\nResult: {rows}"}],
             )
@@ -199,7 +203,7 @@ def process_query(query: str, lang: str = "en") -> str:
                 else f"Question: {query}")
         try:
             r = groq_client.chat.completions.create(
-                model="llama-3.3-70b-versatile", temperature=0.1, max_tokens=200,
+                model=GROQ_MODEL, temperature=0.1, max_tokens=200,
                 messages=[
                     {"role": "system", "content": system},
                     {"role": "user", "content": user},
