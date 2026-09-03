@@ -267,15 +267,22 @@ for msg in st.session_state.messages:
 railway_domain = os.environ.get("RAILWAY_PUBLIC_DOMAIN", "")
 render_domain = os.environ.get("RENDER_EXTERNAL_URL", "")
 if railway_domain:
-    ws_url = f"wss://{railway_domain}/ws"
+    ws_url_override = f"wss://{railway_domain}/ws"
 elif render_domain:
-    ws_url = render_domain.replace("https://", "wss://").replace("http://", "ws://") + "/ws"
+    ws_url_override = render_domain.replace("https://", "wss://").replace("http://", "ws://") + "/ws"
 else:
-    ws_url = f"ws://localhost:{PORT}/ws"
+    # No platform env var found server-side (e.g. no public domain generated yet,
+    # or the var name changed). Let the browser figure it out from its own URL
+    # instead of falling back to the container's localhost, which the browser
+    # can never reach.
+    ws_url_override = ""
 
 audio_html = f"""
 <script>
-const WS_URL = '{ws_url}';
+const WS_URL = {ws_url_override!r} || (
+    (window.location.protocol === 'https:' ? 'wss:' : 'ws:') +
+    '//' + window.location.host + '/ws'
+);
 let ws = null;
 let wsConnected = false;
 let isListening = false;
@@ -289,8 +296,17 @@ let currentAudio = null;
 
 function connectWebSocket() {{
     if (wsConnected) return;
+    setStatus('🔄 Connecting to ' + WS_URL + ' ...', '#ff9800');
+    let settled = false;
     ws = new WebSocket(WS_URL);
+    const diagTimer = setTimeout(function() {{
+        if (!settled) {{
+            setStatus('❌ Timed out reaching ' + WS_URL + ' (readyState=' + ws.readyState + '). Check Railway public domain / deploy logs.', '#f44336');
+        }}
+    }}, 8000);
     ws.onopen = function() {{
+        settled = true;
+        clearTimeout(diagTimer);
         wsConnected = true;
         setStatus('🟢 Connected - click Start', '#4caf50');
     }};
@@ -326,13 +342,17 @@ function connectWebSocket() {{
             console.error('Message parse error:', e);
         }}
     }};
-    ws.onclose = function() {{
+    ws.onclose = function(ev) {{
+        settled = true;
+        clearTimeout(diagTimer);
         wsConnected = false;
-        setStatus('🔄 Reconnecting...', '#ff9800');
+        setStatus('🔄 Closed (code=' + ev.code + ') on ' + WS_URL + ' — retrying...', '#ff9800');
         setTimeout(connectWebSocket, 2000);
     }};
     ws.onerror = function() {{
-        setStatus('❌ Connection error', '#f44336');
+        settled = true;
+        clearTimeout(diagTimer);
+        setStatus('❌ Connection error reaching ' + WS_URL, '#f44336');
     }};
 }}
 
@@ -484,7 +504,7 @@ connectWebSocket();
 </div>
 """
 
-st.html(audio_html)
+components.html(audio_html, height=280)
 
 st.divider()
 if prompt := st.chat_input("Message Reem..."):
