@@ -568,5 +568,5 @@ with st.expander("ℹ️ Debug Info"):
         "chunks_loaded": stats["chunks_loaded"],
         "groq_key": "✅" if GROQ_API_KEY else "❌",
         "deepgram_key": "✅" if DEEPGRAM_API_KEY else "❌",
-        "ws_url": ws_url,
+        "ws_url_server_override": ws_url_override or "(none — browser will derive from its own URL)",
     })
